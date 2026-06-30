@@ -1,0 +1,36 @@
+default_timeframe: 15m
+report_dir: data/reports
+shadow_log_dir: data/shadow_logs
+binance:
+  base_url: https://fapi.binance.com
+  timeout_seconds: 10
+  max_limit: 1500
+api:
+  provider: binance_futures
+  public_base_url: "https://fapi.binance.com"
+  testnet_base_url: "https://demo-fapi.binance.com"
+  mode: "paper"
+safety:
+  production_trading_enabled: false
+  allow_real_orders: false
+  allow_testnet_orders: false
+  require_testnet_base_url: true
+  paper_mode_default: true
+paper_trading:
+  enabled: true
+  starting_balance_usdt: 1000
+  default_position_size_usdt: 100
+  leverage: 10
+  fee_rate: 0.0004
+  slippage_pct: 0.0005
+  intrabar_policy: conservative
+live_research:
+  enabled: false
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  timeframe: "15m"
+  interval_sec: 60
+hypotheses:
+  enabled: true
+  min_trades_for_report: 30

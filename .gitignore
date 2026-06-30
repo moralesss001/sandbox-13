@@ -1,0 +1,41 @@
+.DS_Store
+**/.DS_Store
+
+.env
+.env.*
+!.env.example
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+*.log
+logs/
+
+# Generated research artifacts.
+data/demo_reports/demo_report_*.md
+data/hypothesis_events/hypothesis_events_*.csv
+data/live_market/live_market_*.csv
+data/paper_portfolios/portfolio_snapshots_*.csv
+data/paper_trades/paper_trades_*.csv
+data/testnet_logs/*.csv
+data/journals/*.csv
+data/runtime/status.json
+data/runtime/commands.jsonl
+
+# Candle/history data.
+data/candles/
+data/**/*.csv
+
+# Runtime and generated data.
+data/runtime/
+data/testnet_logs/
+data/paper_trades/
+data/paper_portfolios/
+data/hypothesis_events/
+data/live_market/
+data/demo_reports/
+data/journals/
