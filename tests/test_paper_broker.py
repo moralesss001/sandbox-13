@@ -1,0 +1,66 @@
+from src.order_models import SignalCandidate
+from src.paper_broker import PaperBroker
+from src.portfolio import PaperPortfolio
+from src.shadow_gates import attach_shadow_gate_metadata
+
+
+def _signal(rsi: float = 50.0) -> SignalCandidate:
+    return attach_shadow_gate_metadata(SignalCandidate(
+        symbol="BTCUSDT",
+        timeframe="15m",
+        direction="LONG",
+        entry=100.0,
+        tp=115.0,
+        sl=90.0,
+        rr_ratio=1.5,
+        rsi=rsi,
+        signal_source="test",
+    ))
+
+
+def test_paper_broker_closes_take_profit():
+    portfolio = PaperPortfolio("baseline_rr15")
+    broker = PaperBroker(portfolio, fee_rate=0, slippage_pct=0)
+    broker.open_position(_signal())
+
+    closed = broker.update_positions({"high": 116.0, "low": 99.0})
+
+    assert len(closed) == 1
+    assert closed[0].result == "win"
+    assert closed[0].r == 1.5
+
+
+def test_paper_broker_closes_stop_loss():
+    portfolio = PaperPortfolio("baseline_rr15")
+    broker = PaperBroker(portfolio, fee_rate=0, slippage_pct=0)
+    broker.open_position(_signal())
+
+    closed = broker.update_positions({"high": 101.0, "low": 89.0})
+
+    assert len(closed) == 1
+    assert closed[0].result == "loss"
+    assert closed[0].r == -1.0
+
+
+def test_conservative_intrabar_policy_counts_sl_first():
+    portfolio = PaperPortfolio("baseline_rr15")
+    broker = PaperBroker(portfolio, fee_rate=0, slippage_pct=0, intrabar_policy="conservative")
+    broker.open_position(_signal())
+
+    closed = broker.update_positions({"high": 116.0, "low": 89.0})
+
+    assert len(closed) == 1
+    assert closed[0].result == "loss"
+    assert closed[0].exit_price == 90.0
+
+
+def test_closed_trade_includes_shadow_gate_enrichment():
+    portfolio = PaperPortfolio("baseline_rr15")
+    broker = PaperBroker(portfolio, fee_rate=0, slippage_pct=0)
+    broker.open_position(_signal(rsi=32))
+
+    closed = broker.update_positions({"high": 101.0, "low": 89.0})
+
+    assert closed[0].production_would_allow is False
+    assert closed[0].production_block_reasons == ["rsi_below_35"]
+    assert closed[0].shadow_gate_block_reasons == ["rsi_below_35"]

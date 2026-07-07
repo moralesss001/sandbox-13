@@ -1,0 +1,47 @@
+{
+  "status": "READY",
+  "task": "5E-REMAKE Standalone GitHub Sandbox Export Folder",
+  "export_folder": "export/Crypto13ResearchSandbox",
+  "standalone_repo_ready": true,
+  "github_push_performed": false,
+  "git_remote_changed": false,
+  "deploy_performed": false,
+  "production_changed": false,
+  "secrets_included": false,
+  "real_orders_enabled": false,
+  "testnet_orders_enabled": false,
+  "private_api_enabled": false,
+  "candidate_source": "production_like_raw",
+  "edge_conclusions_allowed": false,
+  "files_created": [
+    "export/Crypto13ResearchSandbox/README.md",
+    "export/Crypto13ResearchSandbox/.gitignore",
+    "export/Crypto13ResearchSandbox/.env.example",
+    "export/Crypto13ResearchSandbox/EXPORT_MANIFEST.md",
+    "export/Crypto13ResearchSandbox/deployment/README_DEPLOY.md",
+    "reports/STANDALONE_EXPORT_SELF_CHECK.md",
+    "reports/STANDALONE_GITHUB_EXPORT_REPORT.md",
+    "reports/STANDALONE_GITHUB_EXPORT_REPORT.json"
+  ],
+  "files_changed": [],
+  "excluded_items_checked": true,
+  "self_check_created": true,
+  "self_check_passed": true,
+  "tests": {
+    "main_project_command": "./.venv/bin/python -m pytest -q",
+    "main_project_result": "105 passed, 1 warning",
+    "export_folder_command": "python -m pytest -q",
+    "export_folder_result": "not available in current shell: python command not found; verified with ../../.venv/bin/python -m pytest -q: 105 passed, 1 warning"
+  },
+  "safety_confirmations": {
+    "sandbox_only": true,
+    "production_code_changed": false,
+    "private_api_used": false,
+    "real_orders_added": false,
+    "testnet_orders_added": false,
+    "deploy_changed": false,
+    "git_push_performed": false,
+    "git_remote_changed": false,
+    "secrets_committed": false
+  }
+}
