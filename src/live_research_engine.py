@@ -68,6 +68,7 @@ class LiveResearchEngine:
         self.storage.save_open_positions(runner.portfolios)
         self.storage.append_closed_trades([])
         status = self.status_store.read()
+        is_single_service = status.get("runtime_layout") == "single_service"
         last_processed = dict(status.get("last_processed_candles") or {})
         ignored_short_candidates_count = int(status.get("ignored_short_candidates_count") or 0)
         rejected_candidates_count = int(status.get("rejected_candidates_count") or 0)
@@ -85,13 +86,13 @@ class LiveResearchEngine:
         self.status_store.write(
             {
                 **status,
-                "mode": "live_paper_lifecycle_mvp",
+                "mode": "sandbox_run_all" if is_single_service else "live_paper_lifecycle_mvp",
                 "interface_target": "telegram",
                 "cli_is_fallback": True,
                 "started_at": status.get("started_at") or utc_now(),
                 "symbols": symbols,
                 "timeframe": timeframe,
-                "direction": "LONG",
+                "direction": "LONG_ONLY" if is_single_service else "LONG",
                 "candidate_mode": source_metadata.candidate_source,
                 **source_metadata.as_status_fields(),
                 "live_direction_policy": "LONG_ONLY",

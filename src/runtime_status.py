@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from .candidate_sources import PLACEHOLDER_EDGE_WARNING, SIMPLIFIED_PLACEHOLDER_
 
 
 DEFAULT_STATUS_PATH = Path("data/runtime/runtime_status.json")
+_STATUS_FILE_LOCK = threading.RLock()
 
 
 def utc_now() -> str:
@@ -79,28 +81,34 @@ class RuntimeStatusStore:
         self.path = Path(path)
 
     def read(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return default_status()
-        return json.loads(self.path.read_text(encoding="utf-8"))
+        with _STATUS_FILE_LOCK:
+            if not self.path.exists():
+                return default_status()
+            return json.loads(self.path.read_text(encoding="utf-8"))
 
     def write(self, status: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(status)
-        payload["updated_at"] = utc_now()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        return payload
+        with _STATUS_FILE_LOCK:
+            payload = dict(status)
+            payload["updated_at"] = utc_now()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            temp_path.replace(self.path)
+            return payload
 
     def update(self, **updates: Any) -> dict[str, Any]:
-        status = self.read()
-        status.update(updates)
-        return self.write(status)
+        with _STATUS_FILE_LOCK:
+            status = self.read()
+            status.update(updates)
+            return self.write(status)
 
     def append_error(self, error: str, limit: int = 20) -> dict[str, Any]:
-        status = self.read()
-        errors = list(status.get("errors", []))
-        errors.append({"timestamp": utc_now(), "error": error})
-        status["errors"] = errors[-limit:]
-        return self.write(status)
+        with _STATUS_FILE_LOCK:
+            status = self.read()
+            errors = list(status.get("errors", []))
+            errors.append({"timestamp": utc_now(), "error": error})
+            status["errors"] = errors[-limit:]
+            return self.write(status)
 
 
 def portfolio_counts(portfolios: dict[str, Any]) -> tuple[int, int]:

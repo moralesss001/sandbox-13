@@ -1,10 +1,22 @@
 # Start Telegram Control Process
 
-Telegram control is implemented through the sandbox CLI.
+## Railway Primary Mode
+
+Do not run Telegram as a Railway Pre-deploy Command.
+
+Railway Start Command:
+
+```bash
+python -m src.main run-all
+```
+
+Pre-deploy Command: empty
+
+`run-all` starts Telegram and the live paper engine in one service. Telegram should remain alive after `/live_stop` so the user can request `/live_start` again.
 
 ## Required Environment
 
-Set environment values according to `ENV_EXAMPLE.md` before starting the bot.
+Set environment values according to `ENV_EXAMPLE.md` before starting the service.
 
 Required by current sandbox code:
 
@@ -15,13 +27,15 @@ Required by current sandbox code:
 - `ALLOW_REAL_ORDERS=false`
 - `PRODUCTION_TRADING_ENABLED=false`
 
-## Start Command
+## Local Fallback Command
+
+Use this only for local Telegram smoke testing:
 
 ```bash
 ./.venv/bin/python -m src.main telegram-bot
 ```
 
-## Smoke Command
+Smoke command:
 
 ```bash
 ./.venv/bin/python -m src.main telegram-bot --once
@@ -37,4 +51,4 @@ Required by current sandbox code:
 
 ## Limitation
 
-Telegram queues sandbox control commands and reads files. It does not guarantee the engine process is already running. If Telegram says a command was queued but status does not change, check the engine process and `data/runtime/commands.jsonl`.
+Telegram queues sandbox control commands and reads files. In Railway, `run-all` supervises the engine in the same service. In local fallback mode, if Telegram says a command was queued but status does not change, check the engine process and `data/runtime/commands.jsonl`.

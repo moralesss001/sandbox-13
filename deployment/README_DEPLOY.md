@@ -1,54 +1,141 @@
-# Sandbox Deploy Readiness Notes
+# Crypto13Research Deployment Notes
 
-This document describes the future intended shape for sandbox hosting. It does not perform deployment and does not change any remote repository.
+This project is deployable as a paper-only research system.
 
-Target path:
+Production trading is disabled. Real Binance orders and testnet orders are not part of this deployment.
+
+## Defaults
 
 ```text
-GitHub -> Railway
+API_MODE=paper
+ALLOW_REAL_ORDERS=false
+ALLOW_TESTNET_ORDERS=false
+TELEGRAM_READ_ONLY=true
+CRYPTO13_SYMBOLS=BTCUSDT,ETHUSDT
+CRYPTO13_TIMEFRAME=15m
+CRYPTO13_CANDIDATE_SOURCE=production_like_raw
+CRYPTO13_INTERVAL_SEC=60
 ```
 
-Repository model:
+## Primary Path: GitHub -> Railway
 
-- Use a separate GitHub repository for this sandbox export.
-- Keep production Crypto13 in a different repository/project.
-- Do not include secrets, runtime data, journals, candles, or private API keys.
+Recommended HQ-controlled deployment path:
 
-Expected Railway services when a server deploy is approved later:
+1. Create a separate GitHub repository for `Crypto13Research`.
+2. Push only this sandbox project to that repository.
+3. Connect the GitHub repository to Railway.
+4. Create one Railway service from the repo.
+5. Set Railway Start Command to `python -m src.main run-all`.
+6. Leave Railway Pre-deploy Command empty.
 
-- `crypto13-live-research`
-- `crypto13-telegram-bot`
+Do not connect Railway to production Crypto13 or `Crypto13-main-4`.
 
-## Railway Variables
+## Railway Service: crypto13-research-sandbox
 
-Required safe variable defaults:
+Railway Start Command:
 
 ```bash
-API_MODE=paper
-TELEGRAM_READ_ONLY=true
-ALLOW_REAL_ORDERS=false
-PRODUCTION_TRADING_ENABLED=false
-PRIVATE_API_ENABLED=false
-REAL_ORDERS_ENABLED=false
-TESTNET_ORDERS_ENABLED=false
+python -m src.main run-all
 ```
 
-Secret variables must be configured only in the hosting environment, not committed.
+Pre-deploy Command: empty
 
-## Storage Warning
+Do not use `python -m src.main telegram-bot` as a Railway Pre-deploy Command.
 
-Railway filesystem storage can be ephemeral. Before using it for real observation, confirm where these files persist:
+Required Railway Variables:
 
-- `data/runtime/runtime_status.json`
-- `data/runtime/commands.jsonl`
-- `data/paper_trades/open_positions.json`
-- `data/paper_trades/closed_trades.csv`
+```text
+API_MODE=paper
+ALLOW_REAL_ORDERS=false
+ALLOW_TESTNET_ORDERS=false
+TELEGRAM_READ_ONLY=true
+TELEGRAM_BOT_TOKEN=<set in Railway, never commit>
+TELEGRAM_ALLOWED_USER_ID=<your Telegram user id>
+CRYPTO13_SYMBOLS=BTCUSDT,ETHUSDT
+CRYPTO13_TIMEFRAME=15m
+CRYPTO13_CANDIDATE_SOURCE=production_like_raw
+CRYPTO13_INTERVAL_SEC=60
+```
+
+Optional variables:
+
+```text
+BINANCE_PUBLIC_BASE_URL=https://fapi.binance.com
+CRYPTO13_DATA_ROOT=data
+```
+
+Telegram is a read-only/control panel. It must not execute trading commands.
+
+## Runtime Files and Storage
+
+The engine and Telegram communicate through files inside the same Railway service:
+
+```text
+data/runtime/runtime_status.json
+data/runtime/commands.jsonl
+data/demo_reports/
+data/paper_portfolios/
+data/hypothesis_events/
+data/paper_trades/
+data/live_market/
+```
+
+Railway filesystem may be ephemeral unless a Volume is attached.
+
+Options:
+
+- Attach a Railway Volume mounted at the project `data/` path if persistent reports are required.
+- Without a Volume, generated reports and snapshots can disappear on redeploy/restart.
+- For MVP validation, ephemeral storage is acceptable only if HQ understands reports are temporary.
+
+## Local Smoke Commands
+
+Dry-run the Railway supervisor plan:
+
+```bash
+python -m src.main run-all --dry-run
+```
+
+Check CLI fallback commands:
+
+```bash
+python -m src.main live-research --symbols BTCUSDT,ETHUSDT --tf 15m --candidate-source production_like_raw --max-iterations 1
+python -m src.main telegram-bot --once
+```
+
+## Docker
+
+The Docker image can run the same service command:
+
+```bash
+python -m src.main run-all
+```
+
+Railway should still set the explicit Start Command.
+
+## Systemd Alternative
+
+Systemd files are legacy examples only:
+
+```text
+deployment/systemd/crypto13-live-research.service.example
+deployment/systemd/crypto13-telegram-bot.service.example
+```
+
+They are not autostart scripts and should be reviewed by HQ before use.
 
 ## Safety
 
-- Sandbox paper mode only.
-- Binance public candles only.
-- No real orders.
-- No testnet orders.
-- No private Binance API.
-- `edge_conclusions_allowed=false`.
+Testnet execution remains disabled unless HQ explicitly approves a future testnet step.
+
+Production trading is disabled in Crypto13Research.
+
+Forbidden:
+
+```text
+ALLOW_REAL_ORDERS=true
+ALLOW_TESTNET_ORDERS=true
+API_MODE=production
+API_MODE=live
+production Binance trading endpoints
+```

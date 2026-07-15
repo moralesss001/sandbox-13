@@ -16,6 +16,12 @@ BINANCE_DATA_MODE=public_only
 REAL_ORDERS_ENABLED=false
 TESTNET_ORDERS_ENABLED=false
 PRIVATE_API_ENABLED=false
+
+CRYPTO13_SYMBOLS=BTCUSDT,ETHUSDT
+CRYPTO13_TIMEFRAME=15m
+CRYPTO13_CANDIDATE_SOURCE=production_like_raw
+CRYPTO13_INTERVAL_SEC=60
+CRYPTO13_DATA_ROOT=data
 ```
 
 ## Notes
@@ -33,3 +39,11 @@ PRIVATE_API_ENABLED=false
 - No production credentials.
 - No real tokens in committed docs.
 - No `.env` with real values in the repository.
+
+## Railway
+
+Railway Start Command: `python -m src.main run-all`
+
+Pre-deploy Command: empty
+
+Do not place `python -m src.main telegram-bot` in Pre-deploy Command.

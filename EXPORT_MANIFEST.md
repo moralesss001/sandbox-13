@@ -16,7 +16,7 @@ export/Crypto13ResearchSandbox/
 - `src/`
 - `config/`
 - `tests/`
-- `reports/` with key readiness and deploy-package reports
+- `reports/` with key readiness, deploy-package, and single-service Railway runner reports
 - `deployment/sandbox_live_paper/`
 - `scripts/` with safe sandbox scripts only
 - `data/.gitkeep`
@@ -56,9 +56,12 @@ export/Crypto13ResearchSandbox/
 ## Entrypoints
 
 - CLI entrypoint: `python -m src.main`
+- Railway Start Command: `python -m src.main run-all`
+- Railway Pre-deploy Command: empty
+- Dry-run command: `python -m src.main run-all --dry-run`
 - Smoke command: `python -m src.main live-research --symbols BTCUSDT --tf 15m --candidate-source production_like_raw --max-iterations 1`
 - Status command: `python -m src.main status`
-- Telegram command: `python -m src.main telegram-bot`
+- Telegram fallback command: `python -m src.main telegram-bot`
 
 ## Current Research Source
 

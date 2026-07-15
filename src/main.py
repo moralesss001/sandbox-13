@@ -15,6 +15,7 @@ from .hypothesis_runner import HypothesisRunner
 from .live_research_engine import LiveResearchEngine
 from .replay_engine import ReplayEngine
 from .report_builder import build_report
+from .run_all import run_all
 from .runtime_status import RuntimeStatusStore
 from .signal_adapter import signals_from_journal
 from .telegram_bot import run_telegram_bot
@@ -79,6 +80,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     telegram = subparsers.add_parser("telegram-bot", help="Run Telegram read-only control bot")
     telegram.add_argument("--once", action="store_true", help="Poll once for smoke tests")
+
+    run_all_parser = subparsers.add_parser("run-all", help="Run Railway single-service sandbox supervisor")
+    run_all_parser.add_argument("--dry-run", action="store_true", help="Print run-all plan and exit")
 
     subparsers.add_parser("status", help="Print runtime status")
     subparsers.add_parser("safety-status", help="Print safety status")
@@ -175,6 +179,8 @@ def main() -> None:
         except RuntimeError as exc:
             print(f"Telegram bot blocked safely: {exc}")
             return
+    elif args.command == "run-all":
+        run_all(dry_run=args.dry_run)
     elif args.command == "status":
         print(TelegramControlPanel(status_store=RuntimeStatusStore()).status())
     elif args.command == "safety-status":

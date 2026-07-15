@@ -6,22 +6,30 @@ This checklist is for a future server deploy decision. It does not deploy anythi
 - [ ] Secrets excluded
 - [ ] `.gitignore` checked
 - [ ] Env example only
-- [ ] Sandbox engine command known
-- [ ] Telegram command known
+- [ ] Railway Start Command set to `python -m src.main run-all`
+- [ ] Railway Pre-deploy Command empty
 - [ ] Storage paths writable
 - [ ] Runtime status writable
 - [ ] Command queue writable
-- [ ] Smoke run passed locally
+- [ ] `python -m src.main run-all --dry-run` passed locally
 - [ ] Full tests passed
 - [ ] Safety status checked
 - [ ] Rollback/stop plan written
 
 ## Required Commands To Know
 
-Engine smoke:
+Railway Start Command:
 
 ```bash
-./.venv/bin/python -m src.main live-research --symbols BTCUSDT --tf 15m --candidate-source production_like_raw --max-iterations 1
+python -m src.main run-all
+```
+
+Pre-deploy Command: empty
+
+Dry-run:
+
+```bash
+python -m src.main run-all --dry-run
 ```
 
 Status:
@@ -30,7 +38,7 @@ Status:
 ./.venv/bin/python -m src.main status
 ```
 
-Telegram:
+Local Telegram fallback only:
 
 ```bash
 ./.venv/bin/python -m src.main telegram-bot
@@ -38,4 +46,4 @@ Telegram:
 
 ## Stop Plan
 
-Use Telegram `/live_stop` first. If the sandbox process itself must be stopped, stop only the sandbox process and preserve runtime files for review.
+Use Telegram `/live_stop` first. This should stop the live paper engine, flush paper artifacts, and keep Telegram available. If the Railway service itself must be stopped, stop only the sandbox service and preserve runtime files for review.

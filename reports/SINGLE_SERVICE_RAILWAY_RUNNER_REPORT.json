@@ -1,0 +1,138 @@
+{
+  "generated_at": "2026-07-07T17:07:21.510848+00:00",
+  "task": "Task 5F: Single Service Railway Runner",
+  "status": "READY",
+  "railway_start_command": "python -m src.main run-all",
+  "railway_pre_deploy_command": "",
+  "defaults": {
+    "CRYPTO13_SYMBOLS": "BTCUSDT,ETHUSDT",
+    "CRYPTO13_TIMEFRAME": "15m",
+    "CRYPTO13_CANDIDATE_SOURCE": "production_like_raw",
+    "CRYPTO13_INTERVAL_SEC": "60"
+  },
+  "runtime_metadata": {
+    "mode": "sandbox_run_all",
+    "runtime_layout": "single_service",
+    "telegram_enabled": true,
+    "live_engine_enabled": true,
+    "candidate_source": "production_like_raw",
+    "timeframe": "15m",
+    "direction": "LONG_ONLY",
+    "real_orders_enabled": false,
+    "testnet_orders_enabled": false,
+    "private_api_used": false
+  },
+  "supervisor_behavior": {
+    "telegram_and_engine_same_service": true,
+    "telegram_stays_alive_after_live_stop": true,
+    "live_start_can_restart_engine": true,
+    "runtime_status_atomic_write": true
+  },
+  "files_created": [
+    "src/run_all.py",
+    "tests/test_run_all.py",
+    "reports/SINGLE_SERVICE_RAILWAY_RUNNER_REPORT.md",
+    "reports/SINGLE_SERVICE_RAILWAY_RUNNER_REPORT.json"
+  ],
+  "files_changed": [
+    "src/main.py",
+    "src/live_research_engine.py",
+    "src/runtime_status.py",
+    "README.md",
+    ".env.example",
+    "deployment/README_DEPLOY.md",
+    "deployment/sandbox_live_paper/RUNBOOK.md",
+    "deployment/sandbox_live_paper/START_ENGINE.md",
+    "deployment/sandbox_live_paper/START_TELEGRAM.md",
+    "deployment/sandbox_live_paper/DEPLOY_READINESS_CHECKLIST.md",
+    "deployment/sandbox_live_paper/ENV_EXAMPLE.md",
+    "tests/test_deployment_docs.py"
+  ],
+  "safety": {
+    "production_changed": false,
+    "real_orders_enabled": false,
+    "testnet_orders_enabled": false,
+    "private_binance_api_keys_added": false,
+    "telegram_predeploy_used": false
+  },
+  "docker_boundary": {
+    "docker_deploy_enabled": false,
+    "railway_switched_to_docker": false,
+    "dockerfile_runtime_default": "python -m src.main --help",
+    "docker_related_changes_reverted": true
+  },
+  "verification_results": [
+    {
+      "command": "./.venv/bin/python -m src.main --help",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "CLI help rendered and includes run-all command."
+    },
+    {
+      "command": "./.venv/bin/python -m src.main run-all --help",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "run-all help rendered and includes --dry-run."
+    },
+    {
+      "command": "./.venv/bin/python -m src.main run-all --dry-run",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "Dry-run printed sandbox_run_all, runtime_layout=single_service, production_like_raw, 15m, LONG_ONLY, real/testnet/private API false, Railway Start Command python -m src.main run-all, Pre-deploy empty."
+    },
+    {
+      "command": "./.venv/bin/python -m pytest -q tests/test_run_all.py tests/test_deployment_docs.py",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "11 passed, 1 warning."
+    },
+    {
+      "command": "./.venv/bin/python -m pytest -q",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "115 passed, 1 warning."
+    },
+    {
+      "command": "cd export/Crypto13ResearchSandbox && ../../.venv/bin/python -m src.main run-all --dry-run",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "Export dry-run printed sandbox_run_all, runtime_layout=single_service, production_like_raw, 15m, LONG_ONLY, real/testnet/private API false."
+    },
+    {
+      "command": "cd export/Crypto13ResearchSandbox && ../../.venv/bin/python -m pytest -q",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "Export full pytest: 115 passed, 1 warning."
+    }
+  ],
+  "full_pytest_result": {
+    "main_project": "115 passed, 1 warning",
+    "export_folder": "115 passed, 1 warning"
+  },
+  "run_all_dry_run_result": {
+    "main_project": "PASS",
+    "export_folder": "PASS",
+    "mode": "sandbox_run_all",
+    "runtime_layout": "single_service",
+    "candidate_source": "production_like_raw",
+    "timeframe": "15m",
+    "direction": "LONG_ONLY",
+    "real_orders_enabled": false,
+    "testnet_orders_enabled": false,
+    "private_api_used": false
+  },
+  "production_touched": false,
+  "scope_correction": {
+    "task_scope": "Single Service Railway Runner only",
+    "docker_related_files_identified": [
+      "deployment/docker/Dockerfile",
+      "export/Crypto13ResearchSandbox/deployment/docker/Dockerfile"
+    ],
+    "docker_related_changes_reverted": true,
+    "docker_systemd_tracked_diff_after_correction": "none",
+    "docker_deploy_enabled": false,
+    "railway_switched_to_docker": false,
+    "systemd_changed_in_correction_pass": false
+  },
+  "private_real_testnet_api_added": false
+}
