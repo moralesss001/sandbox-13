@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from src.telegram_bot import TelegramBot
+from src.telegram_buttons import TelegramResponse
 
 
 class _Handlers:
@@ -37,4 +38,38 @@ def test_send_document_ignores_missing_file(monkeypatch, tmp_path):
     )
     bot = TelegramBot("token", _Handlers())
 
-    bot._send_document("123", str(Path(tmp_path) / "missing.json"))
+    assert bot._send_document("123", str(Path(tmp_path) / "missing.json")) is False
+
+
+def test_export_delivery_reports_only_successful_documents(monkeypatch, tmp_path):
+    sent_path = tmp_path / "runtime_status.json"
+    missing_path = tmp_path / "closed_trades.csv"
+    messages = []
+    documents = []
+    bot = TelegramBot("token", _Handlers())
+
+    monkeypatch.setattr(
+        bot,
+        "_send_message",
+        lambda chat_id, text, reply_markup=None: messages.append((chat_id, text, reply_markup)),
+    )
+
+    def send_document(chat_id, path):
+        documents.append((chat_id, path))
+        return path == str(sent_path)
+
+    monkeypatch.setattr(bot, "_send_document", send_document)
+    response = TelegramResponse(
+        "Export prepared: 2 safe file(s).",
+        {"inline_keyboard": []},
+        (str(sent_path), str(missing_path)),
+    )
+
+    bot._deliver_response("123", response)
+
+    assert documents == [("123", str(sent_path)), ("123", str(missing_path))]
+    assert messages[0][1] == "Export prepared: 2 safe file(s)."
+    assert "Export completed." in messages[-1][1]
+    assert "Sent:\n- runtime_status.json" in messages[-1][1]
+    assert "Missing:\n- closed_trades.csv" in messages[-1][1]
+    assert messages[-1][2] == {"inline_keyboard": []}

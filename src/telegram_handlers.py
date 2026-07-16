@@ -3,18 +3,23 @@ from __future__ import annotations
 from .telegram_config import TelegramConfig
 from .telegram_control import TelegramControlPanel
 from .telegram_buttons import (
+    CALLBACK_CANCEL,
+    CALLBACK_DIAGNOSTICS,
     CALLBACK_LATEST_REPORT,
     CALLBACK_CLOSED_TRADES,
     CALLBACK_EXPORT_DATA,
     CALLBACK_GATES,
+    CALLBACK_MAIN_MENU,
     CALLBACK_OPEN_TRADES,
     CALLBACK_RESTART_LIVE,
     CALLBACK_SAFETY,
+    CALLBACK_SETTINGS,
     CALLBACK_SOURCE,
     CALLBACK_START_CONFIRM,
     CALLBACK_START_LIVE,
     CALLBACK_STATUS,
     CALLBACK_STOP_LIVE,
+    CALLBACK_STOP_LIVE_CONFIRMED,
     FORBIDDEN_CALLBACKS,
     TelegramResponse,
 )
@@ -58,9 +63,12 @@ class TelegramHandlers:
             text, keyboard = self.control.start_live_confirmation()
             return TelegramResponse(text, keyboard)
         if command == "/live_stop":
-            return TelegramResponse(self.control.live_stop(requested_by=str(user_id)), self.control.main_keyboard())
+            text, keyboard = self.control.stop_live_confirmation()
+            return TelegramResponse(text, keyboard)
+        if command == "/live_restart":
+            return TelegramResponse(self.control.restart_live_research(str(user_id)), self.control.main_keyboard())
         if command == "/live_status":
-            return TelegramResponse(self.control.live_status(), self.control.main_keyboard())
+            return TelegramResponse(self.control.diagnostics(), self.control.diagnostics_keyboard())
         if command == "/source":
             return TelegramResponse(self.control.source(), self.control.main_keyboard())
         if command == "/open_trades":
@@ -71,6 +79,10 @@ class TelegramHandlers:
             return TelegramResponse(self.control.gates(), self.control.main_keyboard())
         if command == "/status":
             return TelegramResponse(self.control.status(), self.control.main_keyboard())
+        if command == "/settings":
+            return TelegramResponse(self.control.settings(), self.control.main_keyboard())
+        if command == "/diagnostics":
+            return TelegramResponse(self.control.diagnostics(), self.control.diagnostics_keyboard())
         if command == "/safety":
             return TelegramResponse(self.control.safety(), self.control.main_keyboard())
         if command == "/hypotheses":
@@ -116,11 +128,20 @@ class TelegramHandlers:
         if callback_data == CALLBACK_START_LIVE:
             return TelegramResponse(self.control.live_start(str(user_id)), self.control.main_keyboard())
         if callback_data == CALLBACK_STOP_LIVE:
+            text, keyboard = self.control.stop_live_confirmation()
+            return TelegramResponse(text, keyboard)
+        if callback_data == CALLBACK_STOP_LIVE_CONFIRMED:
             return TelegramResponse(self.control.live_stop(str(user_id)), self.control.main_keyboard())
         if callback_data == CALLBACK_RESTART_LIVE:
             return TelegramResponse(self.control.restart_live_research(str(user_id)), self.control.main_keyboard())
         if callback_data == CALLBACK_STATUS:
-            return TelegramResponse(self.control.live_status(), self.control.main_keyboard())
+            return TelegramResponse(self.control.status(), self.control.main_keyboard())
+        if callback_data == CALLBACK_SETTINGS:
+            return TelegramResponse(self.control.settings(), self.control.main_keyboard())
+        if callback_data == CALLBACK_DIAGNOSTICS:
+            return TelegramResponse(self.control.diagnostics(), self.control.diagnostics_keyboard())
+        if callback_data in {CALLBACK_CANCEL, CALLBACK_MAIN_MENU}:
+            return TelegramResponse("Operator panel.", self.control.main_keyboard())
         if callback_data == CALLBACK_LATEST_REPORT:
             return TelegramResponse(self.control.latest_report(), self.control.main_keyboard())
         if callback_data == CALLBACK_SAFETY:

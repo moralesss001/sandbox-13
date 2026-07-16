@@ -159,10 +159,15 @@ def test_restart_does_not_restore_position_already_present_in_closed_trades(tmp_
 def test_live_stop_preserves_single_service_metadata(tmp_path):
     handlers = _handlers(tmp_path)
 
-    response = handlers.handle_message("/live_stop", user_id="123", chat_id="123")
+    confirmation = handlers.handle_message("/live_stop", user_id="123", chat_id="123")
+    assert "Stop Live Paper Research?" in confirmation.text
+    assert handlers.control.status_store.read()["control_state"] == "running"
+
+    response = handlers.handle_callback("control:stop_live_confirmed", user_id="123", chat_id="123")
     status = handlers.control.status_store.read()
 
-    assert "STOP_LIVE_RESEARCH" in response.text
+    assert "Research stop requested." in response.text
+    assert "Telegram control panel remains online." in response.text
     assert status["mode"] == "sandbox_run_all"
     assert status["runtime_layout"] == "single_service"
     assert status["control_state"] == "stop_requested"
@@ -244,9 +249,10 @@ def test_export_data_reports_missing_files_without_crash(tmp_path):
 
     response = handlers.handle_message("/export_data", user_id="123", chat_id="123")
 
-    assert "Missing files:" in response.text
-    assert str((tmp_path / "paper_trades/open_positions.json").resolve()) in response.text
-    assert str((tmp_path / "paper_trades/closed_trades.csv").resolve()) in response.text
+    assert "Unavailable:" in response.text
+    assert "- open_positions.json" in response.text
+    assert "- closed_trades.csv" in response.text
+    assert str(tmp_path.resolve()) not in response.text
     assert {Path(path).name for path in response.documents} == {"runtime_status.json", "run_summary.json"}
 
 

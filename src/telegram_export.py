@@ -55,7 +55,7 @@ class TelegramDataExporter:
                 self._write_json_value(open_positions_export, self._sanitize(rows))
                 documents.append(str(open_positions_export))
             except (json.JSONDecodeError, OSError) as exc:
-                issues.append(f"Unreadable export file: {self.storage.open_positions_path.resolve()} ({type(exc).__name__})")
+                issues.append(f"Unreadable export file: {self.storage.open_positions_path.name} ({type(exc).__name__})")
         else:
             missing.append(self.storage.open_positions_path)
 
@@ -65,7 +65,7 @@ class TelegramDataExporter:
                 self._write_sanitized_csv(self.storage.closed_trades_path, closed_trades_export)
                 documents.append(str(closed_trades_export))
             except (csv.Error, OSError) as exc:
-                issues.append(f"Unreadable export file: {self.storage.closed_trades_path.resolve()} ({type(exc).__name__})")
+                issues.append(f"Unreadable export file: {self.storage.closed_trades_path.name} ({type(exc).__name__})")
         else:
             missing.append(self.storage.closed_trades_path)
 
@@ -73,11 +73,11 @@ class TelegramDataExporter:
         self._write_json(run_summary_path, self._run_summary(status, diagnostics))
         documents.append(str(run_summary_path))
 
-        lines = ["Live paper data export prepared."]
-        lines.extend(f"send: {Path(path).name}" for path in documents)
+        lines = [f"Export prepared: {len(documents)} safe file(s).", "Sending:"]
+        lines.extend(f"- {Path(path).name}" for path in documents)
         if missing:
-            lines.append("Missing files:")
-            lines.extend(f"- {path.resolve()}" for path in missing)
+            lines.append("Unavailable:")
+            lines.extend(f"- {path.name}" for path in missing)
         lines.extend(issues)
         lines.append("Only allowlisted paper/runtime files are included; secrets and .env are excluded.")
         return ExportDataResult("\n".join(lines), tuple(documents))

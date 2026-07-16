@@ -6,8 +6,13 @@ from dataclasses import dataclass
 CALLBACK_START_CONFIRM = "control:start_live_confirm"
 CALLBACK_START_LIVE = "control:start_live"
 CALLBACK_STOP_LIVE = "control:stop_live"
+CALLBACK_STOP_LIVE_CONFIRMED = "control:stop_live_confirmed"
 CALLBACK_RESTART_LIVE = "control:restart_live"
 CALLBACK_STATUS = "control:status"
+CALLBACK_SETTINGS = "control:settings"
+CALLBACK_DIAGNOSTICS = "control:diagnostics"
+CALLBACK_CANCEL = "control:cancel"
+CALLBACK_MAIN_MENU = "control:main_menu"
 CALLBACK_LATEST_REPORT = "control:latest_report"
 CALLBACK_SAFETY = "control:safety"
 CALLBACK_SOURCE = "control:source"
@@ -34,24 +39,17 @@ class TelegramResponse:
 def main_control_keyboard() -> dict:
     return {
         "inline_keyboard": [
-            [{"text": "Start Live Research", "callback_data": CALLBACK_START_CONFIRM}],
+            [{"text": "▶ Start Research", "callback_data": CALLBACK_START_CONFIRM}],
             [
-                {"text": "Stop Live Research", "callback_data": CALLBACK_STOP_LIVE},
-                {"text": "Restart Live Research", "callback_data": CALLBACK_RESTART_LIVE},
+                {"text": "⏹ Stop Research", "callback_data": CALLBACK_STOP_LIVE},
+                {"text": "📊 Status", "callback_data": CALLBACK_STATUS},
             ],
             [
-                {"text": "Live Status", "callback_data": CALLBACK_STATUS},
-                {"text": "Latest Report", "callback_data": CALLBACK_LATEST_REPORT},
-                {"text": "Safety", "callback_data": CALLBACK_SAFETY},
+                {"text": "📦 Export Data", "callback_data": CALLBACK_EXPORT_DATA},
+                {"text": "⚙ Settings", "callback_data": CALLBACK_SETTINGS},
             ],
             [
-                {"text": "Source", "callback_data": CALLBACK_SOURCE},
-                {"text": "Open Trades", "callback_data": CALLBACK_OPEN_TRADES},
-                {"text": "Closed Trades", "callback_data": CALLBACK_CLOSED_TRADES},
-            ],
-            [
-                {"text": "Gates", "callback_data": CALLBACK_GATES},
-                {"text": "Export data", "callback_data": CALLBACK_EXPORT_DATA},
+                {"text": "🧪 Diagnostics", "callback_data": CALLBACK_DIAGNOSTICS},
             ],
         ]
     }
@@ -60,7 +58,25 @@ def main_control_keyboard() -> dict:
 def start_live_confirmation_keyboard() -> dict:
     return {
         "inline_keyboard": [
-            [{"text": "Confirm Start Live Research", "callback_data": CALLBACK_START_LIVE}],
-            [{"text": "Safety", "callback_data": CALLBACK_SAFETY}],
+            [{"text": "Confirm Start", "callback_data": CALLBACK_START_LIVE}],
+            [{"text": "Cancel", "callback_data": CALLBACK_CANCEL}],
+        ]
+    }
+
+
+def stop_live_confirmation_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "Confirm Stop", "callback_data": CALLBACK_STOP_LIVE_CONFIRMED}],
+            [{"text": "Cancel", "callback_data": CALLBACK_CANCEL}],
+        ]
+    }
+
+
+def diagnostics_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "Restart Research", "callback_data": CALLBACK_RESTART_LIVE}],
+            [{"text": "Back", "callback_data": CALLBACK_MAIN_MENU}],
         ]
     }

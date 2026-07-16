@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import yaml
@@ -10,7 +10,12 @@ from .candidate_sources import PRODUCTION_LIKE_RAW_METADATA
 from .command_queue import CommandQueue
 from .hypothesis_registry import HypothesisRegistry
 from .runtime_status import RuntimeStatusStore
-from .telegram_buttons import main_control_keyboard, start_live_confirmation_keyboard
+from .telegram_buttons import (
+    diagnostics_keyboard,
+    main_control_keyboard,
+    start_live_confirmation_keyboard,
+    stop_live_confirmation_keyboard,
+)
 from .telegram_export import ExportDataResult, TelegramDataExporter
 from .telegram_live_paper import TelegramLivePaperReporter
 
@@ -31,27 +36,76 @@ class TelegramControlPanel:
 
     def status(self) -> str:
         status = self.status_store.read()
+        control_state = str(status.get("control_state") or "stopped")
+        state_title = {
+            "running": "🟢 Research Running",
+            "start_requested": "🟡 Research Starting",
+            "stop_requested": "🟡 Research Stopping",
+            "restart_requested": "🟡 Research Restarting",
+            "stopped": "⚪ Research Stopped",
+        }.get(control_state, "⚪ Research Stopped")
         return "\n".join(
             [
-                "Crypto13Research status",
-                f"mode: {status.get('mode')}",
-                f"updated_at: {status.get('updated_at')}",
-                f"symbols: {', '.join(status.get('symbols') or [])}",
-                f"timeframe: {status.get('timeframe')}",
-                f"candidate_source: {status.get('candidate_source')}",
-                f"candidate_source_version: {status.get('candidate_source_version')}",
-                f"source_description: {status.get('source_description')}",
-                f"edge_conclusions_allowed: {status.get('edge_conclusions_allowed')}",
-                f"candidate_source_warning: {status.get('candidate_source_warning') or 'n/a'}",
-                f"open_positions: {status.get('open_positions_count')}",
-                f"closed_trades: {status.get('closed_trades_count')}",
-                f"latest_report: {status.get('latest_report_path') or 'n/a'}",
+                state_title,
+                f"runtime: {self._runtime_duration(status) if control_state != 'stopped' else 'stopped'}",
+                f"raw candidates (current run): {status.get('raw_candidates_current_run', 0)}",
+                f"open positions (current): {status.get('open_positions_current', status.get('open_positions_count', 0))}",
+                f"closed trades (lifetime): {status.get('closed_trades_lifetime', status.get('closed_trades_count', 0))}",
                 f"errors: {len(status.get('errors') or [])}",
-                f"runtime_data_directory: {status.get('runtime_data_directory') or self.data_root.resolve()}",
-                f"runtime_status_path: {status.get('runtime_status_path') or self.status_store.path}",
-                f"open_positions_path: {status.get('open_positions_path') or self.data_exporter.storage.open_positions_path}",
-                f"closed_trades_path: {status.get('closed_trades_path') or self.data_exporter.storage.closed_trades_path}",
-                f"paths_exist: {status.get('paths_exist') or self.data_exporter.storage.diagnostics()['paths_exist']}",
+                f"source: {status.get('candidate_source') or 'N/A'} {status.get('candidate_source_version') or 'N/A'}",
+                f"market: {status.get('timeframe') or 'N/A'} / {status.get('direction') or status.get('live_direction_policy') or 'N/A'}",
+                "execution: PAPER ONLY",
+            ]
+        )
+
+    def settings(self) -> str:
+        status = self.status_store.read()
+        gate_counts = status.get("shadow_gate_block_counts") or {}
+        enabled_gates = len(gate_counts) if status.get("shadow_gates_enabled") and isinstance(gate_counts, dict) else 0
+        return "\n".join(
+            [
+                "Research Settings (read-only)",
+                f"source: {status.get('candidate_source') or 'N/A'}",
+                f"source version: {status.get('candidate_source_version') or 'N/A'}",
+                f"timeframe: {status.get('timeframe') or 'N/A'}",
+                f"direction: {status.get('direction') or status.get('live_direction_policy') or 'N/A'}",
+                f"symbols: {', '.join(status.get('symbols') or []) or 'N/A'}",
+                f"RR: {status.get('rr_ratio') or status.get('rr') or 'N/A'}",
+                f"enabled hypotheses: {len(self.registry.enabled())}",
+                f"enabled shadow gates: {enabled_gates}",
+                "execution: PAPER ONLY",
+                "real orders: OFF",
+            ]
+        )
+
+    def diagnostics(self) -> str:
+        status = self.status_store.read()
+        diagnostics = self.data_exporter.storage.diagnostics()
+        errors = status.get("errors") or []
+        last_error = self._last_error_class(errors)
+        reasons = status.get("last_shadow_block_reasons") or []
+        last_reason = str(reasons[-1]) if isinstance(reasons, list) and reasons else "N/A"
+        reason_count = len(reasons) if isinstance(reasons, list) else int(bool(reasons))
+        return "\n".join(
+            [
+                "Live Research Diagnostics",
+                f"mode: {status.get('mode') or 'N/A'}",
+                f"runtime layout: {status.get('runtime_layout') or 'N/A'}",
+                f"control state: {status.get('control_state') or 'stopped'}",
+                f"engine state: {status.get('engine_state') or status.get('control_state') or 'stopped'}",
+                f"runtime data: {diagnostics['runtime_data_directory']}",
+                f"runtime status: {diagnostics['runtime_status_path']}",
+                f"open positions: {diagnostics['open_positions_path']}",
+                f"closed trades: {diagnostics['closed_trades_path']}",
+                f"paths exist: {diagnostics['paths_exist']}",
+                f"last candle: {status.get('last_processed_candle_time') or 'N/A'}",
+                f"last error class: {last_error}",
+                f"production allow count: {status.get('production_would_allow_count', 0)}",
+                f"production block count: {status.get('production_would_block_count', 0)}",
+                f"shadow blocked but tracked: {status.get('shadow_blocked_but_tracked_count', 0)}",
+                f"last shadow reason: {last_reason}",
+                f"last shadow reason count: {reason_count}",
+                "execution: PAPER ONLY",
             ]
         )
 
@@ -98,24 +152,43 @@ class TelegramControlPanel:
         return (
             "\n".join(
                 [
-                    "Confirm Start Live Paper",
-                    "Mode: paper only",
-                    "candidate_source: production_like_raw",
-                    "timeframe: 15m",
-                    "direction: LONG_ONLY",
-                    "Real orders: disabled",
-                    "Testnet orders: disabled",
-                    "This queues START_LIVE_PAPER for the sandbox live engine.",
+                    "Start Live Paper Research?",
+                    "",
+                    "Source:",
+                    "production_like_raw v1",
+                    "",
+                    "Mode:",
+                    "15m LONG_ONLY",
+                    "",
+                    "Execution:",
+                    "PAPER ONLY",
+                    "",
+                    "Real orders:",
+                    "OFF",
                 ]
             ),
             start_live_confirmation_keyboard(),
+        )
+
+    def stop_live_confirmation(self) -> tuple[str, dict]:
+        return (
+            "\n".join(
+                [
+                    "Stop Live Paper Research?",
+                    "",
+                    "New candidates and positions will no longer be created.",
+                    "Current runtime data will be saved.",
+                    "Telegram will remain online.",
+                ]
+            ),
+            stop_live_confirmation_keyboard(),
         )
 
     def live_start(self, requested_by: str) -> str:
         status = self.status_store.read()
         control_state = str(status.get("control_state") or "stopped")
         if control_state in {"running", "start_requested"}:
-            return "\n".join(["Live paper already running or start already requested.", "", self.live_status()])
+            return "Research is already running."
 
         symbols = self._default_live_symbols(status)
         payload = {
@@ -169,7 +242,7 @@ class TelegramControlPanel:
         status = self.status_store.read()
         control_state = str(status.get("control_state") or "stopped")
         if control_state not in {"running", "start_requested", "restart_requested"}:
-            return "Live paper is not running. No stop command queued."
+            return "Research is not running."
         return self.stop_live_research(requested_by)
 
     def stop_live_research(self, requested_by: str) -> str:
@@ -185,10 +258,10 @@ class TelegramControlPanel:
         )
         return "\n".join(
             [
-                f"Queued safe command: {command.command} ({command.command_id})",
-                "Live research stop requested.",
-                "Paper artifacts will be flushed by the engine on stop.",
-                f"Final stop report: {report_path}",
+                "Research stop requested.",
+                "",
+                "Telegram control panel remains online.",
+                "Use Export Data to download current runtime files.",
             ]
         )
 
@@ -255,6 +328,9 @@ class TelegramControlPanel:
                 "/live_start",
                 "/live_stop",
                 "/live_status",
+                "/live_restart",
+                "/settings",
+                "/diagnostics",
                 "/source",
                 "/open_trades",
                 "/closed_trades",
@@ -282,6 +358,9 @@ class TelegramControlPanel:
 
     def main_keyboard(self) -> dict:
         return main_control_keyboard()
+
+    def diagnostics_keyboard(self) -> dict:
+        return diagnostics_keyboard()
 
     def _default_live_symbols(self, status: dict) -> list[str]:
         current = [str(symbol).upper() for symbol in (status.get("symbols") or []) if str(symbol).strip()]
@@ -333,3 +412,29 @@ class TelegramControlPanel:
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
+
+    def _runtime_duration(self, status: dict) -> str:
+        started_at = status.get("started_at")
+        if not started_at:
+            return "N/A"
+        try:
+            started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            seconds = max(0, int((datetime.now(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()))
+        except (TypeError, ValueError):
+            return "N/A"
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _last_error_class(self, errors: object) -> str:
+        if not isinstance(errors, list) or not errors:
+            return "N/A"
+        latest = errors[-1]
+        value = latest.get("error") if isinstance(latest, dict) else latest
+        text = str(value or "N/A").splitlines()[0]
+        error_class = text.split(":", maxsplit=1)[0].strip()
+        if error_class.replace(".", "").replace("_", "").isalnum() and " " not in error_class:
+            return error_class
+        return "RecordedError"
