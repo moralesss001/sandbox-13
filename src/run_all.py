@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .candidate_sources import PRODUCTION_LIKE_RAW_METADATA
+from .live_paper_storage import LivePaperStorage
 from .live_research_engine import LiveResearchEngine
 from .runtime_status import RuntimeStatusStore, utc_now
 from .telegram_bot import run_telegram_bot
@@ -92,6 +93,9 @@ def write_run_all_status(
     status_store: RuntimeStatusStore | None = None,
 ) -> dict[str, Any]:
     store = status_store or RuntimeStatusStore(Path("data/runtime/runtime_status.json"))
+    storage = LivePaperStorage(store.path.parent.parent)
+    diagnostics = storage.diagnostics()
+    diagnostics["paths_exist"]["runtime_status"] = True
     previous = store.read()
     safety_status = {
         **(previous.get("safety_status") or {}),
@@ -118,6 +122,8 @@ def write_run_all_status(
         "control_state": "running",
         "railway_start_command": plan["railway_start_command"],
         "railway_pre_deploy_command": plan["railway_pre_deploy_command"],
+        "storage_paths": storage.paths(),
+        **diagnostics,
         "safety_status": safety_status,
     }
     return store.write(status)
@@ -182,9 +188,9 @@ def run_all(
     def supervise_telegram() -> None:
         while not stop_event.is_set():
             try:
-                telegram_runner(once=False)
+                telegram_runner(once=False, data_root=cfg.data_root)
             except Exception as exc:  # noqa: BLE001 - Railway supervisor must log and retry.
-                store.append_error(f"telegram_bot: {exc}")
+                store.append_error(f"telegram_bot: {type(exc).__name__}")
                 stop_event.wait(5)
 
     def supervise_engine() -> None:

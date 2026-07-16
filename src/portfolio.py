@@ -18,16 +18,30 @@ class PaperPortfolio:
         if self.balance is None:
             self.balance = float(self.starting_balance_usdt)
 
-    def add_open_position(self, position) -> None:
+    def add_open_position(self, position) -> bool:
+        identity = getattr(position, "signal_id", None) or getattr(position, "trade_id", None)
+        if identity and any(
+            (getattr(item, "signal_id", None) or getattr(item, "trade_id", None)) == identity
+            for item in self.open_positions
+        ):
+            return False
         self.open_positions.append(position)
+        return True
 
     def remove_open_position(self, position) -> None:
         self.open_positions = [item for item in self.open_positions if item.trade_id != position.trade_id]
 
-    def add_closed_trade(self, trade: Trade) -> None:
+    def add_closed_trade(self, trade: Trade) -> bool:
+        identity = getattr(trade, "signal_id", None) or getattr(trade, "trade_id", None)
+        if identity and any(
+            (getattr(item, "signal_id", None) or getattr(item, "trade_id", None)) == identity
+            for item in self.closed_trades
+        ):
+            return False
         self.closed_trades.append(trade)
         self.balance = float(self.balance or 0.0) + trade.pnl_usdt - trade.fees_usdt - trade.slippage_usdt
         self.equity_curve_R.append(self.net_R)
+        return True
 
     @property
     def wins(self) -> list[Trade]:
@@ -137,4 +151,3 @@ class PaperPortfolio:
             "avg_loss_R": avg_loss,
             "candidate_for_testnet": candidate,
         }
-

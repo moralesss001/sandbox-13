@@ -1,0 +1,90 @@
+{
+  "status": "READY",
+  "task": "5G Live Paper Data Integrity Audit",
+  "actual_runtime_data_directory": "<process working directory>/data by default; exact Railway value is exported at runtime",
+  "runtime_status_path": "<runtime_data_directory>/runtime/runtime_status.json",
+  "open_positions_path": "<runtime_data_directory>/paper_trades/open_positions.json",
+  "closed_trades_path": "<runtime_data_directory>/paper_trades/closed_trades.csv",
+  "runtime_files_available_in_git": false,
+  "runtime_railway_files_directly_inspected": false,
+  "duplicate_defect_confirmed": true,
+  "duplicate_defect_scope": "code-level crash/restart idempotency defect confirmed; duplicates in current Railway data not proven",
+  "duplicate_root_causes": [
+    "random trade IDs without stable candidate identity",
+    "no duplicate check before opening a hypothesis position",
+    "no duplicate check before appending a closed trade",
+    "trade persistence could precede last_processed_candles checkpoint"
+  ],
+  "counter_mismatch_explained": true,
+  "counter_mismatch_limitation": "exact reconciliation requires Railway runtime exports",
+  "counter_semantics": {
+    "raw_candidates_count": "backward-compatible candidate-level lifetime alias",
+    "raw_candidates_current_run": "candidate-level current engine invocation",
+    "raw_candidates_lifetime": "candidate-level cumulative while status persists",
+    "open_virtual_positions_count": "current hypothesis-position instances",
+    "open_positions_current": "explicit current hypothesis-position count",
+    "closed_trades_count": "backward-compatible cumulative CSV record count",
+    "closed_trades_lifetime": "explicit cumulative hypothesis-position closure count",
+    "production_would_allow_count": "cumulative raw candidates allowed by shadow production decision",
+    "production_would_block_count": "cumulative raw candidates blocked by shadow production decision",
+    "shadow_blocked_but_tracked_count": "cumulative blocked raw candidates still tracked in research"
+  },
+  "telegram_export_added": true,
+  "export_command": "/export_data",
+  "export_button": "Export data",
+  "export_files": [
+    "sanitized runtime_status.json",
+    "open_positions.json when present",
+    "closed_trades.csv when present",
+    "run_summary.json"
+  ],
+  "stop_preserves_single_service_metadata": true,
+  "production_changed": false,
+  "real_orders_enabled": false,
+  "testnet_orders_enabled": false,
+  "private_api_used": false,
+  "docker_changed": false,
+  "systemd_changed": false,
+  "railway_config_changed": false,
+  "files_changed": [
+    "src/hypothesis_runner.py",
+    "src/live_paper_storage.py",
+    "src/live_research_engine.py",
+    "src/order_models.py",
+    "src/paper_broker.py",
+    "src/portfolio.py",
+    "src/run_all.py",
+    "src/runtime_status.py",
+    "src/telegram_bot.py",
+    "src/telegram_buttons.py",
+    "src/telegram_config.py",
+    "src/telegram_control.py",
+    "src/telegram_handlers.py",
+    "src/telegram_live_paper.py",
+    "tests/test_live_paper_lifecycle.py",
+    "tests/test_run_all.py",
+    "tests/test_telegram_config.py",
+    "tests/test_telegram_handlers.py"
+  ],
+  "files_created": [
+    "src/telegram_export.py",
+    "tests/test_live_paper_data_integrity.py",
+    "tests/test_telegram_bot_export.py",
+    "reports/LIVE_PAPER_DATA_INTEGRITY_AUDIT.md",
+    "reports/LIVE_PAPER_DATA_INTEGRITY_AUDIT.json"
+  ],
+  "verification_results": {
+    "cli_help": "exit 0",
+    "run_all_dry_run": "exit 0; sandbox_run_all single_service; safety flags false",
+    "run_all_tests": "11 passed, 0 failed, 1 warning",
+    "full_pytest": "132 passed, 0 failed, 1 warning",
+    "independent_tester": "READY; 15 focused tests passed; no remaining findings",
+    "exit_code": 0
+  },
+  "persistence": {
+    "without_railway_volume": "ephemeral and not durable across redeploy/container replacement",
+    "future_recommended_mount_path": "/data",
+    "future_recommended_env": "CRYPTO13_DATA_ROOT=/data",
+    "railway_volume_added_in_task_5g": false
+  }
+}

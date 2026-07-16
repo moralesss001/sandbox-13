@@ -11,6 +11,7 @@ from .command_queue import CommandQueue
 from .hypothesis_registry import HypothesisRegistry
 from .runtime_status import RuntimeStatusStore
 from .telegram_buttons import main_control_keyboard, start_live_confirmation_keyboard
+from .telegram_export import ExportDataResult, TelegramDataExporter
 from .telegram_live_paper import TelegramLivePaperReporter
 
 
@@ -21,11 +22,12 @@ class TelegramControlPanel:
         command_queue: CommandQueue | None = None,
         data_root: str | Path = "data",
     ):
-        self.status_store = status_store or RuntimeStatusStore(Path(data_root) / "runtime/runtime_status.json")
-        self.command_queue = command_queue or CommandQueue(Path(data_root) / "runtime/commands.jsonl")
-        self.data_root = Path(data_root)
+        self.data_root = Path(data_root).expanduser().resolve()
+        self.status_store = status_store or RuntimeStatusStore(self.data_root / "runtime/runtime_status.json")
+        self.command_queue = command_queue or CommandQueue(self.data_root / "runtime/commands.jsonl")
         self.registry = HypothesisRegistry()
         self.live_reporter = TelegramLivePaperReporter(self.status_store, self.data_root)
+        self.data_exporter = TelegramDataExporter(self.data_root, self.status_store)
 
     def status(self) -> str:
         status = self.status_store.read()
@@ -45,6 +47,11 @@ class TelegramControlPanel:
                 f"closed_trades: {status.get('closed_trades_count')}",
                 f"latest_report: {status.get('latest_report_path') or 'n/a'}",
                 f"errors: {len(status.get('errors') or [])}",
+                f"runtime_data_directory: {status.get('runtime_data_directory') or self.data_root.resolve()}",
+                f"runtime_status_path: {status.get('runtime_status_path') or self.status_store.path}",
+                f"open_positions_path: {status.get('open_positions_path') or self.data_exporter.storage.open_positions_path}",
+                f"closed_trades_path: {status.get('closed_trades_path') or self.data_exporter.storage.closed_trades_path}",
+                f"paths_exist: {status.get('paths_exist') or self.data_exporter.storage.diagnostics()['paths_exist']}",
             ]
         )
 
@@ -98,7 +105,7 @@ class TelegramControlPanel:
                     "direction: LONG_ONLY",
                     "Real orders: disabled",
                     "Testnet orders: disabled",
-                    "This queues START_LIVE_PAPER for the separate sandbox engine process.",
+                    "This queues START_LIVE_PAPER for the sandbox live engine.",
                 ]
             ),
             start_live_confirmation_keyboard(),
@@ -129,12 +136,14 @@ class TelegramControlPanel:
             "real_orders_enabled": False,
             "testnet_orders_enabled": False,
         }
+        mode_updates = {} if status.get("runtime_layout") == "single_service" else {"mode": "live_paper"}
+        direction = "LONG_ONLY" if status.get("runtime_layout") == "single_service" else "LONG"
         self.status_store.update(
-            mode="live_paper",
+            **mode_updates,
             control_state="start_requested",
             symbols=symbols,
             timeframe="15m",
-            direction="LONG",
+            direction=direction,
             live_direction_policy="LONG_ONLY",
             candidate_mode=PRODUCTION_LIKE_RAW_METADATA.candidate_source,
             **PRODUCTION_LIKE_RAW_METADATA.as_status_fields(),
@@ -166,8 +175,10 @@ class TelegramControlPanel:
     def stop_live_research(self, requested_by: str) -> str:
         command = self.command_queue.enqueue("STOP_LIVE_RESEARCH", requested_by=requested_by)
         report_path = self._write_stop_report(command.command_id)
+        status = self.status_store.read()
+        mode_updates = {} if status.get("runtime_layout") == "single_service" else {"mode": "paper"}
         self.status_store.update(
-            mode="paper",
+            **mode_updates,
             control_state="stop_requested",
             stop_requested_at=datetime.now().isoformat(timespec="seconds"),
             latest_report_path=str(report_path),
@@ -183,8 +194,13 @@ class TelegramControlPanel:
 
     def restart_live_research(self, requested_by: str) -> str:
         command = self.command_queue.enqueue("RESTART_LIVE_RESEARCH", requested_by=requested_by)
-        self.status_store.update(mode="paper", control_state="restart_requested")
+        status = self.status_store.read()
+        mode_updates = {} if status.get("runtime_layout") == "single_service" else {"mode": "paper"}
+        self.status_store.update(**mode_updates, control_state="restart_requested")
         return f"Queued safe command: {command.command} ({command.command_id})"
+
+    def export_data(self) -> ExportDataResult:
+        return self.data_exporter.build()
 
     def latest_report(self) -> str:
         status_path = self.status_store.read().get("latest_report_path")
@@ -253,6 +269,7 @@ class TelegramControlPanel:
                 "/suggestions",
                 "/portfolio",
                 "/events",
+                "/export_data",
                 "/help",
             ]
         )

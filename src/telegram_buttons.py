@@ -14,6 +14,7 @@ CALLBACK_SOURCE = "control:source"
 CALLBACK_OPEN_TRADES = "control:open_trades"
 CALLBACK_CLOSED_TRADES = "control:closed_trades"
 CALLBACK_GATES = "control:gates"
+CALLBACK_EXPORT_DATA = "control:export_data"
 
 FORBIDDEN_CALLBACKS = {
     "control:real_order",
@@ -27,6 +28,7 @@ FORBIDDEN_CALLBACKS = {
 class TelegramResponse:
     text: str
     reply_markup: dict | None = None
+    documents: tuple[str, ...] = ()
 
 
 def main_control_keyboard() -> dict:
@@ -47,7 +49,10 @@ def main_control_keyboard() -> dict:
                 {"text": "Open Trades", "callback_data": CALLBACK_OPEN_TRADES},
                 {"text": "Closed Trades", "callback_data": CALLBACK_CLOSED_TRADES},
             ],
-            [{"text": "Gates", "callback_data": CALLBACK_GATES}],
+            [
+                {"text": "Gates", "callback_data": CALLBACK_GATES},
+                {"text": "Export data", "callback_data": CALLBACK_EXPORT_DATA},
+            ],
         ]
     }
 

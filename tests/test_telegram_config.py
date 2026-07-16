@@ -37,5 +37,20 @@ def test_telegram_config_accepts_read_only_paper():
     )
 
     assert config.is_allowed_user("123")
+    assert config.is_allowed_chat("123")
     assert config.read_only is True
 
+
+def test_telegram_config_supports_separate_allowed_chat():
+    config = load_telegram_config_from_env(
+        {
+            "TELEGRAM_BOT_TOKEN": "token",
+            "TELEGRAM_ALLOWED_USER_ID": "123",
+            "TELEGRAM_ALLOWED_CHAT_ID": "456",
+            "API_MODE": "paper",
+        }
+    )
+
+    assert config.is_allowed_user("123")
+    assert config.is_allowed_chat("456")
+    assert not config.is_allowed_chat("123")

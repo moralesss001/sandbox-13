@@ -82,6 +82,7 @@ def test_telegram_buttons_exist():
     assert "Open Trades" in labels
     assert "Closed Trades" in labels
     assert "Gates" in labels
+    assert "Export data" in labels
 
 
 def test_start_live_confirmation_screen(tmp_path):
@@ -218,7 +219,7 @@ def test_open_trades_handles_empty_positions(tmp_path):
 def test_open_trades_shows_position_metadata(tmp_path):
     handlers = _handlers(tmp_path)
     path = tmp_path / "paper_trades/open_positions.json"
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '[{"symbol":"BTCUSDT","direction":"LONG","entry_price":100,"tp":105,"sl":95,'
         '"entry_time":"2026-07-07T00:00:00Z","candidate_source":"production_like_raw",'
@@ -245,7 +246,7 @@ def test_closed_trades_handles_empty_file(tmp_path):
 def test_closed_trades_shows_latest_closed_trade(tmp_path):
     handlers = _handlers(tmp_path)
     path = tmp_path / "paper_trades/closed_trades.csv"
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "symbol,direction,entry_price,exit_price,result,r,reason,candidate_source,production_would_allow,production_block_reasons\n"
         "BTCUSDT,LONG,100,95,loss,-1,SL,production_like_raw,False,market_mode_15m_no_trade\n",
@@ -278,7 +279,7 @@ def test_gates_shows_saved_missed_allowed_analytics(tmp_path):
         last_shadow_block_reasons=["rsi_below_35"],
     )
     path = tmp_path / "paper_trades/closed_trades.csv"
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "production_would_allow,r\n"
         "False,-1\n"

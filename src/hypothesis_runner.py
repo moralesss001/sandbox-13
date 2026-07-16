@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .hypothesis_registry import HypothesisRegistry
-from .order_models import HypothesisDecisionType, SignalCandidate
+from .order_models import HypothesisDecisionType, SignalCandidate, ensure_candidate_id, hypothesis_signal_id
 from .paper_broker import PaperBroker
 from .portfolio import PaperPortfolio
 
@@ -34,6 +34,7 @@ class HypothesisRunner:
         slippage_pct: float = 0.0005,
         intrabar_policy: str = "conservative",
         data_root: str | Path = "data",
+        known_closed_signal_ids: set[str] | None = None,
     ):
         self.registry = registry or HypothesisRegistry()
         self.portfolios = {
@@ -48,6 +49,7 @@ class HypothesisRunner:
                 fee_rate=fee_rate,
                 slippage_pct=slippage_pct,
                 intrabar_policy=intrabar_policy,
+                known_closed_signal_ids=known_closed_signal_ids,
             )
             for hypothesis_id, portfolio in self.portfolios.items()
         }
@@ -55,11 +57,14 @@ class HypothesisRunner:
         self.data_root = Path(data_root)
 
     def process_signal(self, signal: SignalCandidate, close_from_history: bool = False) -> None:
+        candidate_id = ensure_candidate_id(signal)
         for hypothesis in self.registry.enabled():
             decision = hypothesis.decide(signal)
             event = {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "hypothesis_id": hypothesis.hypothesis_id,
+                "candidate_id": candidate_id,
+                "signal_id": hypothesis_signal_id(candidate_id, hypothesis.hypothesis_id),
                 "symbol": signal.symbol,
                 "timeframe": signal.timeframe,
                 "decision": decision.decision,

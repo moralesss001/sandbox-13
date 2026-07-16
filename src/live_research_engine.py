@@ -30,8 +30,8 @@ class LiveResearchEngine:
         command_queue: CommandQueue | None = None,
     ):
         self.config = config or {}
-        self.data_root = Path(data_root)
-        self.storage = LivePaperStorage(self.data_root)
+        self.storage = LivePaperStorage(data_root)
+        self.data_root = self.storage.data_root
         self.status_store = status_store or RuntimeStatusStore(self.storage.runtime_status_path)
         self.command_queue = command_queue or CommandQueue(self.data_root / "runtime/commands.jsonl")
         self.public_base_url = self.config.get("api", {}).get("public_base_url", "https://fapi.binance.com")
@@ -55,6 +55,7 @@ class LiveResearchEngine:
             raise ValueError("Live Paper Lifecycle MVP supports 15m timeframe only.")
         source_metadata = self._live_source_metadata(candidate_source)
         paper_cfg = self.config.get("paper_trading", {})
+        closed_signal_ids = self.storage.closed_signal_ids()
         runner = HypothesisRunner(
             starting_balance_usdt=float(paper_cfg.get("starting_balance_usdt", 1000)),
             default_position_size_usdt=float(paper_cfg.get("default_position_size_usdt", 100)),
@@ -63,8 +64,9 @@ class LiveResearchEngine:
             slippage_pct=float(paper_cfg.get("slippage_pct", 0.0005)),
             intrabar_policy=str(paper_cfg.get("intrabar_policy", "conservative")),
             data_root=self.data_root,
+            known_closed_signal_ids=closed_signal_ids,
         )
-        self.storage.restore_open_positions(runner.portfolios)
+        self.storage.restore_open_positions(runner.portfolios, closed_signal_ids=closed_signal_ids)
         self.storage.save_open_positions(runner.portfolios)
         self.storage.append_closed_trades([])
         status = self.status_store.read()
@@ -72,7 +74,10 @@ class LiveResearchEngine:
         last_processed = dict(status.get("last_processed_candles") or {})
         ignored_short_candidates_count = int(status.get("ignored_short_candidates_count") or 0)
         rejected_candidates_count = int(status.get("rejected_candidates_count") or 0)
-        raw_candidates_count = int(status.get("raw_candidates_count") or 0)
+        raw_candidates_lifetime = int(
+            status.get("raw_candidates_lifetime", status.get("raw_candidates_count", 0)) or 0
+        )
+        raw_candidates_current_run = 0
         production_would_allow_count = int(status.get("production_would_allow_count") or 0)
         production_would_block_count = int(status.get("production_would_block_count") or 0)
         shadow_blocked_but_tracked_count = int(status.get("shadow_blocked_but_tracked_count") or 0)
@@ -82,7 +87,9 @@ class LiveResearchEngine:
         last_shadow_block_reasons = list(status.get("last_shadow_block_reasons") or [])
         symbols = [symbol.upper() for symbol in symbols]
         open_count, _ = portfolio_counts(runner.portfolios)
-        closed_count = self.storage.closed_trades_count()
+        closed_trades_lifetime = self.storage.closed_trades_count()
+        diagnostics = self.storage.diagnostics()
+        diagnostics["paths_exist"]["runtime_status"] = True
         self.status_store.write(
             {
                 **status,
@@ -99,21 +106,26 @@ class LiveResearchEngine:
                 "last_processed_candles": last_processed,
                 "open_virtual_positions_count": open_count,
                 "open_positions_count": open_count,
-                "closed_trades_count": closed_count,
+                "open_positions_current": open_count,
+                "closed_trades_count": closed_trades_lifetime,
+                "closed_trades_lifetime": closed_trades_lifetime,
                 "ignored_short_candidates_count": ignored_short_candidates_count,
                 "rejected_candidates_count": rejected_candidates_count,
                 "shadow_gates_enabled": True,
-                "raw_candidates_count": raw_candidates_count,
+                "raw_candidates_count": raw_candidates_lifetime,
+                "raw_candidates_lifetime": raw_candidates_lifetime,
+                "raw_candidates_current_run": raw_candidates_current_run,
                 "production_would_allow_count": production_would_allow_count,
                 "production_would_block_count": production_would_block_count,
                 "shadow_blocked_but_tracked_count": shadow_blocked_but_tracked_count,
                 "shadow_gate_block_counts": shadow_gate_block_counts,
                 "last_shadow_block_reasons": last_shadow_block_reasons[-20:],
                 "storage_paths": self.storage.paths(),
+                **diagnostics,
                 "research_pack_2_enabled": False,
                 "checkpoint_progress": {
-                    "closed_trades_count": closed_count,
-                    "next_checkpoint": self._next_checkpoint(closed_count),
+                    "closed_trades_count": closed_trades_lifetime,
+                    "next_checkpoint": self._next_checkpoint(closed_trades_lifetime),
                 },
                 "safety_status": {
                     "api_mode": self.api_mode,
@@ -133,13 +145,22 @@ class LiveResearchEngine:
             index += 1
             control_action = self._control_action()
             if control_action in {"STOP_LIVE_RESEARCH", "RESTART_LIVE_RESEARCH"}:
+                self.storage.save_open_positions(runner.portfolios)
                 paths = runner.save_artifacts()
-                open_count, closed_count = portfolio_counts(runner.portfolios)
+                open_count, _ = portfolio_counts(runner.portfolios)
+                closed_trades_lifetime = self.storage.closed_trades_count()
                 report_path = self._write_engine_stop_report(runner, paths, reason=control_action)
                 self.status_store.update(
                     control_state="stopped" if control_action == "STOP_LIVE_RESEARCH" else "restart_requested",
+                    open_virtual_positions_count=open_count,
                     open_positions_count=open_count,
-                    closed_trades_count=closed_count,
+                    open_positions_current=open_count,
+                    closed_trades_count=closed_trades_lifetime,
+                    closed_trades_lifetime=closed_trades_lifetime,
+                    raw_candidates_count=raw_candidates_lifetime,
+                    raw_candidates_lifetime=raw_candidates_lifetime,
+                    raw_candidates_current_run=raw_candidates_current_run,
+                    **self.storage.diagnostics(),
                     latest_report_path=str(report_path),
                     last_iteration_at=utc_now(),
                 )
@@ -168,7 +189,8 @@ class LiveResearchEngine:
                     self.storage.save_open_positions(runner.portfolios)
                     signal = self._build_signal(symbol, timeframe, closed, candidate_source)
                     if signal:
-                        raw_candidates_count += 1
+                        raw_candidates_lifetime += 1
+                        raw_candidates_current_run += 1
                         if signal.production_would_allow:
                             production_would_allow_count += 1
                         else:
@@ -200,18 +222,22 @@ class LiveResearchEngine:
                     self.status_store.append_error(f"{symbol} {timeframe}: {exc}")
             paths = runner.save_artifacts()
             open_count, _ = portfolio_counts(runner.portfolios)
-            closed_count = self.storage.closed_trades_count()
+            closed_trades_lifetime = self.storage.closed_trades_count()
             self.status_store.update(
                 last_iteration_at=utc_now(),
                 last_processed_candles=last_processed,
                 last_processed_candle_time=max(last_processed.values()) if last_processed else None,
                 open_virtual_positions_count=open_count,
                 open_positions_count=open_count,
-                closed_trades_count=closed_count,
+                open_positions_current=open_count,
+                closed_trades_count=closed_trades_lifetime,
+                closed_trades_lifetime=closed_trades_lifetime,
                 ignored_short_candidates_count=ignored_short_candidates_count,
                 rejected_candidates_count=rejected_candidates_count,
                 shadow_gates_enabled=True,
-                raw_candidates_count=raw_candidates_count,
+                raw_candidates_count=raw_candidates_lifetime,
+                raw_candidates_lifetime=raw_candidates_lifetime,
+                raw_candidates_current_run=raw_candidates_current_run,
                 production_would_allow_count=production_would_allow_count,
                 production_would_block_count=production_would_block_count,
                 shadow_blocked_but_tracked_count=shadow_blocked_but_tracked_count,
@@ -221,9 +247,10 @@ class LiveResearchEngine:
                 **source_metadata.as_status_fields(),
                 live_direction_policy="LONG_ONLY",
                 storage_paths=self.storage.paths(),
+                **self.storage.diagnostics(),
                 checkpoint_progress={
-                    "closed_trades_count": closed_count,
-                    "next_checkpoint": self._next_checkpoint(closed_count),
+                    "closed_trades_count": closed_trades_lifetime,
+                    "next_checkpoint": self._next_checkpoint(closed_trades_lifetime),
                 },
                 latest_report_path=self.status_store.read().get("latest_report_path"),
             )
@@ -323,7 +350,8 @@ class LiveResearchEngine:
         reports_dir = self.data_root / "demo_reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         path = reports_dir / f"engine_stop_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        open_count, closed_count = portfolio_counts(runner.portfolios)
+        open_count, closed_current_run = portfolio_counts(runner.portfolios)
+        closed_lifetime = self.storage.closed_trades_count()
         lines = [
             "# Crypto13Research Engine Stop Report",
             "",
@@ -331,7 +359,8 @@ class LiveResearchEngine:
             f"- Reason: `{reason}`",
             f"- Generated at: {datetime.now().isoformat(timespec='seconds')}",
             f"- Open virtual positions: {open_count}",
-            f"- Closed virtual trades: {closed_count}",
+            f"- Closed virtual trades (current run): {closed_current_run}",
+            f"- Closed virtual trades (lifetime): {closed_lifetime}",
             "",
             "## Flushed artifacts",
             f"- Paper trades: `{paths.get('paper_trades', 'n/a')}`",

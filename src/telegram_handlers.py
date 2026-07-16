@@ -5,6 +5,7 @@ from .telegram_control import TelegramControlPanel
 from .telegram_buttons import (
     CALLBACK_LATEST_REPORT,
     CALLBACK_CLOSED_TRADES,
+    CALLBACK_EXPORT_DATA,
     CALLBACK_GATES,
     CALLBACK_OPEN_TRADES,
     CALLBACK_RESTART_LIVE,
@@ -33,11 +34,16 @@ class TelegramHandlers:
         self.config = config
         self.control = control or TelegramControlPanel()
 
-    def handle(self, text: str, user_id: str | int | None) -> str:
-        return self.handle_message(text, user_id).text
+    def handle(self, text: str, user_id: str | int | None, chat_id: str | int | None = None) -> str:
+        return self.handle_message(text, user_id, chat_id).text
 
-    def handle_message(self, text: str, user_id: str | int | None) -> TelegramResponse:
-        if not self.config.is_allowed_user(user_id):
+    def handle_message(
+        self,
+        text: str,
+        user_id: str | int | None,
+        chat_id: str | int | None = None,
+    ) -> TelegramResponse:
+        if not self._is_authorized(user_id, chat_id):
             return TelegramResponse("Unauthorized user.")
         text = (text or "").strip()
         command = text.split()[0] if text else "/help"
@@ -87,12 +93,20 @@ class TelegramHandlers:
             return TelegramResponse(self.control.portfolio(), self.control.main_keyboard())
         if command == "/events":
             return TelegramResponse(self.control.events(), self.control.main_keyboard())
+        if command == "/export_data":
+            result = self.control.export_data()
+            return TelegramResponse(result.message, self.control.main_keyboard(), result.documents)
         if command == "/help":
             return TelegramResponse(self.control.help(), self.control.main_keyboard())
         return TelegramResponse("Unknown command.\n" + self.control.help(), self.control.main_keyboard())
 
-    def handle_callback(self, callback_data: str, user_id: str | int | None) -> TelegramResponse:
-        if not self.config.is_allowed_user(user_id):
+    def handle_callback(
+        self,
+        callback_data: str,
+        user_id: str | int | None,
+        chat_id: str | int | None = None,
+    ) -> TelegramResponse:
+        if not self._is_authorized(user_id, chat_id):
             return TelegramResponse("Unauthorized user.")
         if callback_data in FORBIDDEN_CALLBACKS:
             return TelegramResponse("Callback is forbidden in read-only Telegram control panel.")
@@ -119,4 +133,12 @@ class TelegramHandlers:
             return TelegramResponse(self.control.closed_trades(), self.control.main_keyboard())
         if callback_data == CALLBACK_GATES:
             return TelegramResponse(self.control.gates(), self.control.main_keyboard())
+        if callback_data == CALLBACK_EXPORT_DATA:
+            result = self.control.export_data()
+            return TelegramResponse(result.message, self.control.main_keyboard(), result.documents)
         return TelegramResponse("Unknown control button.", self.control.main_keyboard())
+
+    def _is_authorized(self, user_id: str | int | None, chat_id: str | int | None) -> bool:
+        if not self.config.is_allowed_user(user_id):
+            return False
+        return chat_id is None or self.config.is_allowed_chat(chat_id)

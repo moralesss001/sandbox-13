@@ -104,8 +104,9 @@ def test_run_all_dry_run_does_not_start_components(tmp_path, capsys):
 def test_run_all_starts_telegram_and_live_engine_components(tmp_path):
     calls = {"telegram": 0, "engine_init": 0, "engine_run": 0}
 
-    def telegram_runner(**_kwargs):
+    def telegram_runner(**kwargs):
         calls["telegram"] += 1
+        assert kwargs["data_root"] == "data"
 
     class Engine:
         def __init__(self, **_kwargs):
@@ -130,6 +131,41 @@ def test_run_all_starts_telegram_and_live_engine_components(tmp_path):
     assert calls["telegram"] >= 1
     assert calls["engine_init"] >= 1
     assert calls["engine_run"] >= 1
+
+
+def test_run_all_uses_same_custom_data_root_for_telegram_engine_and_status(tmp_path):
+    calls = {"telegram_roots": [], "engine_roots": []}
+    config = RunAllConfig(
+        symbols=["BTCUSDT"],
+        timeframe="15m",
+        candidate_source="production_like_raw",
+        interval_sec=1,
+        data_root=str(tmp_path),
+    )
+    store = RuntimeStatusStore(tmp_path / "runtime/runtime_status.json")
+
+    def telegram_runner(**kwargs):
+        calls["telegram_roots"].append(kwargs["data_root"])
+
+    class Engine:
+        def __init__(self, **kwargs):
+            calls["engine_roots"].append(kwargs["data_root"])
+
+        def run(self, **_kwargs):
+            store.update(control_state="stopped")
+
+    result = run_all(
+        config=config,
+        telegram_runner=telegram_runner,
+        engine_factory=Engine,
+        status_store=store,
+        supervisor_runtime_sec=0.05,
+    )
+
+    assert result == 0
+    assert set(calls["telegram_roots"]) == {str(tmp_path)}
+    assert calls["engine_roots"] == [str(tmp_path)]
+    assert Path(store.read()["runtime_data_directory"]) == tmp_path.resolve()
 
 
 def test_run_all_shutdown_handler_updates_status(tmp_path):

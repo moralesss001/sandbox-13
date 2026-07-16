@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
@@ -39,6 +40,8 @@ class SignalCandidate:
     tp: float
     sl: float
     rr_ratio: float = 1.5
+    candidate_id: str | None = None
+    signal_id: str | None = None
     created_at: str | None = None
     rsi: float | None = None
     atr_pct: float | None = None
@@ -94,6 +97,8 @@ class Position:
     rr_ratio: float
     position_size_usdt: float
     leverage: float
+    candidate_id: str | None = None
+    signal_id: str | None = None
     status: str = TradeStatus.OPEN.value
     reason: str | None = None
     market_phase: str = "UNKNOWN"
@@ -158,3 +163,38 @@ class HypothesisDecision:
 
 def new_trade_id(hypothesis_id: str, symbol: str) -> str:
     return f"{hypothesis_id}-{symbol}-{uuid4().hex[:12]}"
+
+
+def ensure_candidate_id(signal: SignalCandidate) -> str:
+    """Return a restart-stable identity for a live candle candidate."""
+    if signal.candidate_id:
+        return str(signal.candidate_id)
+    raw = signal.raw or {}
+    candle_time = next(
+        (
+            raw.get(field)
+            for field in ("candle_close_time", "close_time", "candle_open_time", "open_time")
+            if raw.get(field) is not None
+        ),
+        signal.created_at or "unknown_time",
+    )
+    material = "|".join(
+        [
+            str(signal.candidate_source or "unknown"),
+            str(signal.candidate_source_version or "unknown"),
+            signal.symbol.upper(),
+            signal.timeframe.lower(),
+            signal.direction.upper(),
+            str(candle_time),
+            str(signal.setup_type or "UNKNOWN").lower(),
+        ]
+    )
+    signal.candidate_id = f"candidate-{sha256(material.encode('utf-8')).hexdigest()[:24]}"
+    signal.signal_id = signal.signal_id or signal.candidate_id
+    return signal.candidate_id
+
+
+def hypothesis_signal_id(candidate_id: str, hypothesis_id: str) -> str:
+    """Identify one candidate instance inside one paper hypothesis portfolio."""
+    material = f"{candidate_id}|{hypothesis_id}"
+    return f"signal-{sha256(material.encode('utf-8')).hexdigest()[:24]}"

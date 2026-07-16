@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from .gate_analytics import summarize_gate_outcomes
+from .live_paper_storage import LivePaperStorage
 from .runtime_status import RuntimeStatusStore
 
 
@@ -16,7 +17,8 @@ EDGE_WARNING = "Live paper is collecting evidence. Do not use this as production
 class TelegramLivePaperReporter:
     def __init__(self, status_store: RuntimeStatusStore, data_root: str | Path = "data"):
         self.status_store = status_store
-        self.data_root = Path(data_root)
+        self.storage = LivePaperStorage(data_root)
+        self.data_root = self.storage.data_root
 
     def live_status(self) -> str:
         status = self.status_store.read()
@@ -33,6 +35,10 @@ class TelegramLivePaperReporter:
                 f"open_virtual_positions_count: {status.get('open_virtual_positions_count', status.get('open_positions_count', 0))}",
                 f"closed_trades_count: {status.get('closed_trades_count', 0)}",
                 f"raw_candidates_count: {status.get('raw_candidates_count', 0)}",
+                f"raw_candidates_current_run: {status.get('raw_candidates_current_run', 0)}",
+                f"raw_candidates_lifetime: {status.get('raw_candidates_lifetime', status.get('raw_candidates_count', 0))}",
+                f"open_positions_current: {status.get('open_positions_current', status.get('open_positions_count', 0))}",
+                f"closed_trades_lifetime: {status.get('closed_trades_lifetime', status.get('closed_trades_count', 0))}",
                 f"production_would_allow_count: {status.get('production_would_allow_count', 0)}",
                 f"production_would_block_count: {status.get('production_would_block_count', 0)}",
                 f"shadow_blocked_but_tracked_count: {status.get('shadow_blocked_but_tracked_count', 0)}",
@@ -40,6 +46,11 @@ class TelegramLivePaperReporter:
                 f"last_shadow_block_reasons: {self._join(status.get('last_shadow_block_reasons') or [])}",
                 f"errors: {len(status.get('errors') or [])}",
                 f"edge_conclusions_allowed: {status.get('edge_conclusions_allowed')}",
+                f"runtime_data_directory: {status.get('runtime_data_directory') or self.storage.data_root}",
+                f"runtime_status_path: {status.get('runtime_status_path') or self.storage.runtime_status_path}",
+                f"open_positions_path: {status.get('open_positions_path') or self.storage.open_positions_path}",
+                f"closed_trades_path: {status.get('closed_trades_path') or self.storage.closed_trades_path}",
+                f"paths_exist: {status.get('paths_exist') or self.storage.diagnostics()['paths_exist']}",
                 EDGE_WARNING,
                 "Safety:",
                 f"public_data_only: {safety.get('public_data_only', True)}",
@@ -69,7 +80,7 @@ class TelegramLivePaperReporter:
         )
 
     def open_trades(self, limit: int = 10) -> str:
-        path = self.data_root / "paper_trades/open_positions.json"
+        path = self.storage.open_positions_path
         if not path.exists() or path.stat().st_size == 0:
             return "No open virtual positions."
         try:
@@ -98,7 +109,7 @@ class TelegramLivePaperReporter:
         return "\n".join(lines)
 
     def closed_trades(self, limit: int = 5) -> str:
-        path = self.data_root / "paper_trades/closed_trades.csv"
+        path = self.storage.closed_trades_path
         if not path.exists() or path.stat().st_size == 0:
             return "No closed paper trades yet."
         df = pd.read_csv(path)
@@ -146,7 +157,7 @@ class TelegramLivePaperReporter:
         return "\n".join(lines)
 
     def _closed_trade_rows(self) -> list[dict[str, Any]]:
-        path = self.data_root / "paper_trades/closed_trades.csv"
+        path = self.storage.closed_trades_path
         if not path.exists() or path.stat().st_size == 0:
             return []
         df = pd.read_csv(path)

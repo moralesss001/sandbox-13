@@ -80,7 +80,7 @@ def test_live_paper_storage_persists_and_restores_open_positions(tmp_path):
     storage = LivePaperStorage(tmp_path)
     portfolio = PaperPortfolio("baseline_rr15")
     broker = PaperBroker(portfolio, fee_rate=0, slippage_pct=0)
-    broker.open_position(_signal())
+    broker.open_position(_signal(raw={"close_time": 1}))
 
     storage.save_open_positions({"baseline_rr15": portfolio})
     restored_portfolio = PaperPortfolio("baseline_rr15")
@@ -95,10 +95,10 @@ def test_live_paper_storage_appends_closed_trades(tmp_path):
     storage = LivePaperStorage(tmp_path)
     portfolio = PaperPortfolio("baseline_rr15")
     broker = PaperBroker(portfolio, fee_rate=0, slippage_pct=0)
-    broker.open_position(_signal())
+    broker.open_position(_signal(raw={"close_time": 2}))
     first = broker.update_positions({"high": 111.0, "low": 99.0})
     storage.append_closed_trades(first)
-    broker.open_position(_signal())
+    broker.open_position(_signal(raw={"close_time": 3}))
     second = broker.update_positions({"high": 101.0, "low": 94.0})
     storage.append_closed_trades(second)
 
