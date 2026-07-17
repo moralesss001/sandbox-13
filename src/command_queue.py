@@ -11,6 +11,7 @@ from uuid import uuid4
 DEFAULT_COMMAND_QUEUE_PATH = Path("data/runtime/commands.jsonl")
 
 ALLOWED_COMMANDS = {
+    "START_LIVE_PAPER",
     "START_LIVE_RESEARCH",
     "STOP_LIVE_RESEARCH",
     "RESTART_LIVE_RESEARCH",

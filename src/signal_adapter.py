@@ -6,9 +6,11 @@ from typing import Any
 
 import pandas as pd
 
+from .candidate_sources import JOURNAL_REPLAY_METADATA, SIMPLIFIED_PLACEHOLDER_METADATA
 from .journal_loader import load_journal_csv, normalize_result
 from .order_models import SignalCandidate
 from .session_classifier import classify_session
+from .shadow_gates import attach_shadow_gate_metadata
 
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
@@ -40,7 +42,7 @@ def signals_from_journal(file_path: str | Path, timeframe: str = "15m") -> tuple
             continue
         session = classify_session(row)
         signals.append(
-            SignalCandidate(
+            attach_shadow_gate_metadata(SignalCandidate(
                 symbol=_safe_text(row.get("symbol"), "UNKNOWN"),
                 timeframe=_safe_text(row.get("timeframe"), timeframe),
                 direction=_safe_text(row.get("direction"), "LONG").upper(),
@@ -59,10 +61,11 @@ def signals_from_journal(file_path: str | Path, timeframe: str = "15m") -> tuple
                 confidence_factors=row.get("confidence_factors"),
                 signal_source="journal_replay",
                 source=str(file_path),
+                **JOURNAL_REPLAY_METADATA.as_candidate_kwargs(),
                 result=result,
                 historical_r=_safe_float(row.get("r")),
                 raw=row.to_dict(),
-            )
+            ))
         )
     return signals, warnings
 
@@ -107,7 +110,7 @@ def signal_from_klines(symbol: str, timeframe: str, klines: pd.DataFrame) -> Sig
     else:
         sl = last_close + risk_distance
         tp = last_close - risk_distance * 1.5
-    return SignalCandidate(
+    return attach_shadow_gate_metadata(SignalCandidate(
         symbol=symbol.upper(),
         timeframe=timeframe,
         direction=direction,
@@ -125,5 +128,6 @@ def signal_from_klines(symbol: str, timeframe: str, klines: pd.DataFrame) -> Sig
         reason="simplified_ma_atr_signal",
         signal_source="research_simplified_live",
         source="binance_public_rest",
+        **SIMPLIFIED_PLACEHOLDER_METADATA.as_candidate_kwargs(),
         raw=last.to_dict(),
-    )
+    ))

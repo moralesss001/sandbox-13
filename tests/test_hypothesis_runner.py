@@ -2,15 +2,15 @@ from src.hypothesis_runner import HypothesisRunner
 from src.order_models import SignalCandidate
 
 
-def test_each_hypothesis_gets_separate_portfolio():
-    runner = HypothesisRunner(data_root="/tmp/crypto13_test_runner")
+def test_each_hypothesis_gets_separate_portfolio(tmp_path):
+    runner = HypothesisRunner(data_root=tmp_path)
 
     assert "baseline_rr15" in runner.portfolios
     assert "ban_rsi_below_35" in runner.portfolios
     assert runner.portfolios["baseline_rr15"] is not runner.portfolios["ban_rsi_below_35"]
 
 
-def test_hypothesis_replay_counts_baseline_and_filter():
+def test_hypothesis_replay_counts_baseline_and_filter(tmp_path):
     signal = SignalCandidate(
         symbol="BTCUSDT",
         timeframe="15m",
@@ -26,7 +26,7 @@ def test_hypothesis_replay_counts_baseline_and_filter():
         signal_source="journal_replay",
         result="loss",
     )
-    runner = HypothesisRunner(data_root="/tmp/crypto13_test_runner")
+    runner = HypothesisRunner(data_root=tmp_path)
     runner.process_signal(signal, close_from_history=True)
     metrics = runner.metrics()
 
@@ -34,4 +34,3 @@ def test_hypothesis_replay_counts_baseline_and_filter():
     assert metrics["baseline_rr15"]["net_R"] == -1.0
     assert metrics["ban_rsi_below_35"]["trades_blocked"] == 1
     assert metrics["ban_rsi_below_35"]["blocked_losses"] == 1
-

@@ -8,17 +8,20 @@ import pandas as pd
 import yaml
 
 from .binance_data import get_latest_klines, save_klines_csv
+from .candidate_sources import CandidateSourceType
 from .demo_report_builder import build_demo_report
 from .execution_safety import validate_api_mode
 from .hypothesis_runner import HypothesisRunner
 from .live_research_engine import LiveResearchEngine
 from .replay_engine import ReplayEngine
 from .report_builder import build_report
+from .run_all import run_all
 from .runtime_status import RuntimeStatusStore
 from .signal_adapter import signals_from_journal
 from .telegram_bot import run_telegram_bot
 from .telegram_control import TelegramControlPanel
 from .testnet_broker import TestnetBroker
+from .universe import CONTRACT_UNIVERSE
 
 
 DEFAULT_CONFIG = Path("config/research_config.yaml")
@@ -46,11 +49,24 @@ def _build_parser() -> argparse.ArgumentParser:
     hypothesis.add_argument("--out", default="data/demo_reports", help="Demo report output directory")
 
     live = subparsers.add_parser("live-research", help="Run safe paper live research polling")
-    live.add_argument("--symbols", required=True, help="Comma-separated symbols, e.g. BTCUSDT,ETHUSDT")
+    live.add_argument(
+        "--symbols",
+        default=",".join(CONTRACT_UNIVERSE),
+        help="Comma-separated symbols; defaults to the 46-pair contract universe",
+    )
     live.add_argument("--tf", default="15m", help="Timeframe")
     live.add_argument("--interval-sec", type=int, default=60, help="Polling interval")
     live.add_argument("--max-iterations", type=int, default=1, help="Safe smoke default is one iteration")
     live.add_argument("--run-forever", action="store_true", help="Run continuously for VPS paper research")
+    live.add_argument(
+        "--candidate-source",
+        default=CandidateSourceType.SIMPLIFIED_PLACEHOLDER.value,
+        choices=[
+            CandidateSourceType.SIMPLIFIED_PLACEHOLDER.value,
+            CandidateSourceType.PRODUCTION_LIKE_RAW.value,
+        ],
+        help="Live research candidate source",
+    )
     live.add_argument("--out", default="data/demo_reports", help="Demo report output directory")
 
     fetch = subparsers.add_parser("fetch-klines", help="Fetch Binance Futures public klines")
@@ -69,6 +85,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     telegram = subparsers.add_parser("telegram-bot", help="Run Telegram read-only control bot")
     telegram.add_argument("--once", action="store_true", help="Poll once for smoke tests")
+
+    run_all_parser = subparsers.add_parser("run-all", help="Run Railway single-service sandbox supervisor")
+    run_all_parser.add_argument("--dry-run", action="store_true", help="Print run-all plan and exit")
 
     subparsers.add_parser("status", help="Print runtime status")
     subparsers.add_parser("safety-status", help="Print safety status")
@@ -118,6 +137,7 @@ def main() -> None:
             interval_sec=args.interval_sec,
             max_iterations=args.max_iterations,
             run_forever=args.run_forever,
+            candidate_source=args.candidate_source,
         )
         report_path = build_demo_report(
             result,
@@ -164,6 +184,8 @@ def main() -> None:
         except RuntimeError as exc:
             print(f"Telegram bot blocked safely: {exc}")
             return
+    elif args.command == "run-all":
+        run_all(dry_run=args.dry_run)
     elif args.command == "status":
         print(TelegramControlPanel(status_store=RuntimeStatusStore()).status())
     elif args.command == "safety-status":

@@ -26,9 +26,7 @@ paper_trading:
   intrabar_policy: conservative
 live_research:
   enabled: false
-  symbols:
-    - BTCUSDT
-    - ETHUSDT
+  universe: "crypto13_contract_v1"
   timeframe: "15m"
   interval_sec: 60
 hypotheses:

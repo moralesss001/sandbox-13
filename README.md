@@ -116,13 +116,13 @@ Uses Binance Futures public REST market data. Public market data does not need A
 Safe smoke run:
 
 ```bash
-python -m src.main live-research --symbols BTCUSDT,ETHUSDT --tf 15m --interval-sec 60 --max-iterations 1
+python -m src.main live-research --tf 15m --interval-sec 60 --max-iterations 1
 ```
 
 VPS 24/7 paper mode requires explicit `--run-forever`:
 
 ```bash
-python -m src.main live-research --symbols BTCUSDT,ETHUSDT --tf 15m --interval-sec 60 --run-forever
+python -m src.main live-research --tf 15m --interval-sec 60 --run-forever
 ```
 
 The engine writes runtime state to:
@@ -261,6 +261,55 @@ Safety
 `/start_live` and the `Start Live Research` button show a confirmation screen first. The confirmation queues only `START_LIVE_RESEARCH`; it does not start trading, testnet, or production execution.
 
 `Stop Live Research` queues `STOP_LIVE_RESEARCH`, writes a stop report path back to Telegram, and lets the separate live research engine flush paper artifacts and exit safely when it processes the queue.
+
+## Railway Single Service
+
+Railway should run one sandbox service that starts Telegram control and the live paper engine together.
+
+Railway Start Command:
+
+```bash
+python -m src.main run-all
+```
+
+Pre-deploy Command: empty
+
+Do not use `python -m src.main telegram-bot` as Railway Pre-deploy Command. Telegram must stay in the main runtime process, not in a pre-deploy step.
+
+Useful dry-run before deploy:
+
+```bash
+python -m src.main run-all --dry-run
+```
+
+`run-all` defaults:
+
+```text
+UNIVERSE=crypto13_contract_v1 (46 pairs from src/universe.py)
+CRYPTO13_TIMEFRAME=15m
+CRYPTO13_CANDIDATE_SOURCE=production_like_raw
+CRYPTO13_INTERVAL_SEC=60
+```
+
+`CRYPTO13_SYMBOLS` no longer narrows the default runtime universe. Symbols that are unavailable from the public market-data source remain configured and are reported separately in runtime status.
+
+Runtime status is written to:
+
+```text
+data/runtime/runtime_status.json
+```
+
+Safety metadata remains fixed to paper-only:
+
+```text
+real_orders_enabled=false
+testnet_orders_enabled=false
+private_api_used=false
+```
+
+`/live_stop` stops only the live paper engine and flushes paper artifacts. Telegram remains available in the same Railway service so `/live_start` can request a restart.
+
+Legacy separate commands remain available as local fallback, but Railway should use `run-all`.
 
 ## VPS / Server Foundation
 

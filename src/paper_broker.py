@@ -3,7 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from .order_models import ExecutionResult, Position, SignalCandidate, Trade, new_trade_id
+from .order_models import (
+    ExecutionResult,
+    Position,
+    SignalCandidate,
+    Trade,
+    ensure_candidate_id,
+    hypothesis_signal_id,
+    new_trade_id,
+)
 from .portfolio import PaperPortfolio
 
 
@@ -16,6 +24,7 @@ class PaperBroker:
         fee_rate: float = 0.0004,
         slippage_pct: float = 0.0005,
         intrabar_policy: str = "conservative",
+        known_closed_signal_ids: set[str] | None = None,
     ):
         self.portfolio = portfolio
         self.position_size_usdt = float(position_size_usdt)
@@ -23,8 +32,15 @@ class PaperBroker:
         self.fee_rate = float(fee_rate)
         self.slippage_pct = float(slippage_pct)
         self.intrabar_policy = intrabar_policy
+        self.known_closed_signal_ids = known_closed_signal_ids if known_closed_signal_ids is not None else set()
 
     def open_position(self, signal: SignalCandidate, size_multiplier: float = 1.0) -> ExecutionResult:
+        candidate_id = ensure_candidate_id(signal)
+        signal_id = hypothesis_signal_id(candidate_id, self.portfolio.hypothesis_id)
+        if signal_id in self.known_closed_signal_ids:
+            return ExecutionResult(status="DUPLICATE", reason="signal_already_closed")
+        if any(position.signal_id == signal_id for position in self.portfolio.open_positions):
+            return ExecutionResult(status="DUPLICATE", reason="signal_already_open")
         size = self.position_size_usdt * max(0.0, float(size_multiplier))
         position = Position(
             trade_id=new_trade_id(self.portfolio.hypothesis_id, signal.symbol),
@@ -39,6 +55,8 @@ class PaperBroker:
             rr_ratio=float(signal.rr_ratio or 1.5),
             position_size_usdt=size,
             leverage=self.leverage,
+            candidate_id=candidate_id,
+            signal_id=signal_id,
             reason=signal.reason,
             market_phase=signal.market_phase,
             session=signal.session,
@@ -47,13 +65,26 @@ class PaperBroker:
             atr_pct=signal.atr_pct,
             trend_htf=signal.trend_htf,
             source=signal.signal_source,
+            candidate_source=signal.candidate_source,
+            candidate_source_version=signal.candidate_source_version,
+            is_placeholder=signal.is_placeholder,
+            edge_conclusions_allowed=signal.edge_conclusions_allowed,
+            direction_support=signal.direction_support,
+            source_description=signal.source_description,
+            shadow_gates=signal.shadow_gates,
+            production_would_allow=signal.production_would_allow,
+            production_block_reasons=signal.production_block_reasons,
+            shadow_gate_block_reasons=signal.shadow_gate_block_reasons,
         )
-        self.portfolio.add_open_position(position)
+        if not self.portfolio.add_open_position(position):
+            return ExecutionResult(status="DUPLICATE", reason="signal_already_open")
         return ExecutionResult(status="OPENED", trade=None, reason=None)
 
-    def update_positions(self, current_candle: dict[str, Any]) -> list[Trade]:
+    def update_positions(self, current_candle: dict[str, Any], symbol: str | None = None) -> list[Trade]:
         closed: list[Trade] = []
         for position in list(self.portfolio.open_positions):
+            if symbol and position.symbol.upper() != symbol.upper():
+                continue
             exit_price, reason = self._resolve_exit(position, current_candle)
             if exit_price is not None:
                 closed.append(self.close_position(position, reason=reason, exit_price=exit_price))
@@ -81,6 +112,8 @@ class PaperBroker:
         )
         self.portfolio.remove_open_position(position)
         self.portfolio.add_closed_trade(trade)
+        if trade.signal_id:
+            self.known_closed_signal_ids.add(trade.signal_id)
         return trade
 
     def get_open_positions(self) -> list[Position]:

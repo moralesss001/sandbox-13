@@ -1,0 +1,17 @@
+[Unit]
+Description=Crypto13Research Telegram read-only control bot example
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/crypto13_research
+Environment=API_MODE=paper
+Environment=ALLOW_REAL_ORDERS=false
+Environment=ALLOW_TESTNET_ORDERS=false
+Environment=TELEGRAM_READ_ONLY=true
+EnvironmentFile=-/opt/crypto13_research/.env
+ExecStart=/usr/bin/python -m src.main telegram-bot
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

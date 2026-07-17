@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 
+from .candidate_sources import PRODUCTION_LIKE_RAW_METADATA
 from .command_queue import CommandQueue
 from .hypothesis_registry import HypothesisRegistry
 from .runtime_status import RuntimeStatusStore
-from .telegram_buttons import main_control_keyboard, start_live_confirmation_keyboard
+from .telegram_buttons import (
+    diagnostics_keyboard,
+    main_control_keyboard,
+    start_live_confirmation_keyboard,
+    stop_live_confirmation_keyboard,
+)
+from .telegram_export import ExportDataResult, TelegramDataExporter
+from .telegram_live_paper import TelegramLivePaperReporter
+from .universe import configured_universe
 
 
 class TelegramControlPanel:
@@ -18,24 +27,100 @@ class TelegramControlPanel:
         command_queue: CommandQueue | None = None,
         data_root: str | Path = "data",
     ):
-        self.status_store = status_store or RuntimeStatusStore(Path(data_root) / "runtime/status.json")
-        self.command_queue = command_queue or CommandQueue(Path(data_root) / "runtime/commands.jsonl")
-        self.data_root = Path(data_root)
+        self.data_root = Path(data_root).expanduser().resolve()
+        self.status_store = status_store or RuntimeStatusStore(self.data_root / "runtime/runtime_status.json")
+        self.command_queue = command_queue or CommandQueue(self.data_root / "runtime/commands.jsonl")
         self.registry = HypothesisRegistry()
+        self.live_reporter = TelegramLivePaperReporter(self.status_store, self.data_root)
+        self.data_exporter = TelegramDataExporter(self.data_root, self.status_store)
 
     def status(self) -> str:
         status = self.status_store.read()
+        control_state = str(status.get("control_state") or "stopped")
+        configured = status.get("configured_symbols") or status.get("symbols") or []
+        active = status.get("active_symbols") or []
+        unavailable = status.get("unavailable_symbols") or []
+        state_title = {
+            "running": "🟢 Research Running",
+            "start_requested": "🟡 Research Starting",
+            "stop_requested": "🟡 Research Stopping",
+            "restart_requested": "🟡 Research Restarting",
+            "stopped": "⚪ Research Stopped",
+        }.get(control_state, "⚪ Research Stopped")
         return "\n".join(
             [
-                "Crypto13Research status",
-                f"mode: {status.get('mode')}",
-                f"updated_at: {status.get('updated_at')}",
-                f"symbols: {', '.join(status.get('symbols') or [])}",
-                f"timeframe: {status.get('timeframe')}",
-                f"open_positions: {status.get('open_positions_count')}",
-                f"closed_trades: {status.get('closed_trades_count')}",
-                f"latest_report: {status.get('latest_report_path') or 'n/a'}",
+                state_title,
+                f"runtime: {self._runtime_duration(status) if control_state != 'stopped' else 'stopped'}",
+                f"raw candidates (current run): {status.get('raw_candidates_current_run', 0)}",
+                f"open positions (current): {status.get('open_positions_current', status.get('open_positions_count', 0))}",
+                f"closed trades (lifetime): {status.get('closed_trades_lifetime', status.get('closed_trades_count', 0))}",
                 f"errors: {len(status.get('errors') or [])}",
+                f"source: {status.get('candidate_source') or 'N/A'} {status.get('candidate_source_version') or 'N/A'}",
+                f"market: {status.get('timeframe') or 'N/A'} / {status.get('direction') or status.get('live_direction_policy') or 'N/A'}",
+                f"universe: {len(configured)} configured / {len(active)} active / {len(unavailable)} unavailable",
+                "execution: PAPER ONLY",
+            ]
+        )
+
+    def settings(self) -> str:
+        status = self.status_store.read()
+        configured = status.get("configured_symbols") or status.get("symbols") or []
+        active = status.get("active_symbols") or []
+        unavailable = status.get("unavailable_symbols") or []
+        gate_counts = status.get("shadow_gate_block_counts") or {}
+        enabled_gates = len(gate_counts) if status.get("shadow_gates_enabled") and isinstance(gate_counts, dict) else 0
+        return "\n".join(
+            [
+                "Research Settings (read-only)",
+                f"source: {status.get('candidate_source') or 'N/A'}",
+                f"source version: {status.get('candidate_source_version') or 'N/A'}",
+                f"timeframe: {status.get('timeframe') or 'N/A'}",
+                f"direction: {status.get('direction') or status.get('live_direction_policy') or 'N/A'}",
+                f"configured symbols: {len(configured)}",
+                f"active symbols: {len(active)}",
+                f"unavailable symbols: {', '.join(unavailable) or 'none'}",
+                f"RR: {status.get('rr_ratio') or status.get('rr') or 'N/A'}",
+                f"enabled hypotheses: {len(self.registry.enabled())}",
+                f"enabled shadow gates: {enabled_gates}",
+                "execution: PAPER ONLY",
+                "real orders: OFF",
+            ]
+        )
+
+    def diagnostics(self) -> str:
+        status = self.status_store.read()
+        configured = status.get("configured_symbols") or status.get("symbols") or []
+        active = status.get("active_symbols") or []
+        unavailable = status.get("unavailable_symbols") or []
+        diagnostics = self.data_exporter.storage.diagnostics()
+        errors = status.get("errors") or []
+        last_error = self._last_error_class(errors)
+        reasons = status.get("last_shadow_block_reasons") or []
+        last_reason = str(reasons[-1]) if isinstance(reasons, list) and reasons else "N/A"
+        reason_count = len(reasons) if isinstance(reasons, list) else int(bool(reasons))
+        return "\n".join(
+            [
+                "Live Research Diagnostics",
+                f"mode: {status.get('mode') or 'N/A'}",
+                f"runtime layout: {status.get('runtime_layout') or 'N/A'}",
+                f"control state: {status.get('control_state') or 'stopped'}",
+                f"engine state: {status.get('engine_state') or status.get('control_state') or 'stopped'}",
+                f"runtime data: {diagnostics['runtime_data_directory']}",
+                f"runtime status: {diagnostics['runtime_status_path']}",
+                f"open positions: {diagnostics['open_positions_path']}",
+                f"closed trades: {diagnostics['closed_trades_path']}",
+                f"paths exist: {diagnostics['paths_exist']}",
+                f"configured universe count: {len(configured)}",
+                f"active runtime universe count: {len(active)}",
+                f"unavailable symbols: {', '.join(unavailable) or 'none'}",
+                f"last candle: {status.get('last_processed_candle_time') or 'N/A'}",
+                f"last error class: {last_error}",
+                f"production allow count: {status.get('production_would_allow_count', 0)}",
+                f"production block count: {status.get('production_would_block_count', 0)}",
+                f"shadow blocked but tracked: {status.get('shadow_blocked_but_tracked_count', 0)}",
+                f"last shadow reason: {last_reason}",
+                f"last shadow reason count: {reason_count}",
+                "execution: PAPER ONLY",
             ]
         )
 
@@ -48,6 +133,11 @@ class TelegramControlPanel:
                 f"allow_real_orders: {safety.get('allow_real_orders', False)}",
                 f"allow_testnet_orders: {safety.get('allow_testnet_orders', False)}",
                 f"telegram_read_only: {safety.get('telegram_read_only', True)}",
+                f"public_data_only: {safety.get('public_data_only', True)}",
+                f"private_api_used: {safety.get('private_api_used', False)}",
+                f"real_orders_enabled: {safety.get('real_orders_enabled', False)}",
+                f"testnet_orders_enabled: {safety.get('testnet_orders_enabled', False)}",
+                "production_code_changed: false",
                 "production_trading: disabled",
             ]
         )
@@ -77,43 +167,128 @@ class TelegramControlPanel:
         return (
             "\n".join(
                 [
-                    "Confirm Start Live Research",
-                    "Mode: paper only",
-                    "Real orders: disabled",
-                    "Testnet orders: disabled",
-                    "This queues START_LIVE_RESEARCH for the separate engine process.",
+                    "Start Live Paper Research?",
+                    "",
+                    "Source:",
+                    "production_like_raw v1",
+                    "",
+                    "Mode:",
+                    "15m LONG_ONLY",
+                    "",
+                    "Execution:",
+                    "PAPER ONLY",
+                    "",
+                    "Real orders:",
+                    "OFF",
                 ]
             ),
             start_live_confirmation_keyboard(),
         )
 
+    def stop_live_confirmation(self) -> tuple[str, dict]:
+        return (
+            "\n".join(
+                [
+                    "Stop Live Paper Research?",
+                    "",
+                    "New candidates and positions will no longer be created.",
+                    "Current runtime data will be saved.",
+                    "Telegram will remain online.",
+                ]
+            ),
+            stop_live_confirmation_keyboard(),
+        )
+
+    def live_start(self, requested_by: str) -> str:
+        status = self.status_store.read()
+        control_state = str(status.get("control_state") or "stopped")
+        if control_state in {"running", "start_requested"}:
+            return "Research is already running."
+
+        symbols = self._default_live_symbols(status)
+        payload = {
+            "candidate_source": PRODUCTION_LIKE_RAW_METADATA.candidate_source,
+            "candidate_source_version": PRODUCTION_LIKE_RAW_METADATA.candidate_source_version,
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "symbols": symbols,
+            "mode": "live_paper",
+        }
+        command = self.command_queue.enqueue("START_LIVE_PAPER", requested_by=requested_by, payload=payload)
+        safety_status = {
+            **(status.get("safety_status") or {}),
+            "api_mode": "paper",
+            "telegram_read_only": True,
+            "public_data_only": True,
+            "private_api_used": False,
+            "real_orders_enabled": False,
+            "testnet_orders_enabled": False,
+        }
+        mode_updates = {} if status.get("runtime_layout") == "single_service" else {"mode": "live_paper"}
+        direction = "LONG_ONLY" if status.get("runtime_layout") == "single_service" else "LONG"
+        self.status_store.update(
+            **mode_updates,
+            control_state="start_requested",
+            symbols=symbols,
+            timeframe="15m",
+            direction=direction,
+            live_direction_policy="LONG_ONLY",
+            candidate_mode=PRODUCTION_LIKE_RAW_METADATA.candidate_source,
+            **PRODUCTION_LIKE_RAW_METADATA.as_status_fields(),
+            shadow_gates_enabled=True,
+            safety_status=safety_status,
+        )
+        return "\n".join(
+            [
+                f"Queued safe command: {command.command} ({command.command_id})",
+                "Live paper start requested for sandbox engine.",
+                f"symbols: {', '.join(symbols)}",
+                "candidate_source: production_like_raw",
+                "timeframe: 15m",
+                "direction: LONG_ONLY",
+                "Real/testnet orders remain disabled.",
+            ]
+        )
+
     def start_live_research(self, requested_by: str) -> str:
-        command = self.command_queue.enqueue("START_LIVE_RESEARCH", requested_by=requested_by)
-        self.status_store.update(mode="paper", control_state="start_requested")
-        return f"Queued safe command: {command.command} ({command.command_id})"
+        return self.live_start(requested_by)
+
+    def live_stop(self, requested_by: str) -> str:
+        status = self.status_store.read()
+        control_state = str(status.get("control_state") or "stopped")
+        if control_state not in {"running", "start_requested", "restart_requested"}:
+            return "Research is not running."
+        return self.stop_live_research(requested_by)
 
     def stop_live_research(self, requested_by: str) -> str:
         command = self.command_queue.enqueue("STOP_LIVE_RESEARCH", requested_by=requested_by)
         report_path = self._write_stop_report(command.command_id)
+        status = self.status_store.read()
+        mode_updates = {} if status.get("runtime_layout") == "single_service" else {"mode": "paper"}
         self.status_store.update(
-            mode="paper",
+            **mode_updates,
             control_state="stop_requested",
             stop_requested_at=datetime.now().isoformat(timespec="seconds"),
             latest_report_path=str(report_path),
         )
         return "\n".join(
             [
-                f"Queued safe command: {command.command} ({command.command_id})",
-                "Live research stop requested.",
-                "Paper artifacts will be flushed by the engine on stop.",
-                f"Final stop report: {report_path}",
+                "Research stop requested.",
+                "",
+                "Telegram control panel remains online.",
+                "Use Export Data to download current runtime files.",
             ]
         )
 
     def restart_live_research(self, requested_by: str) -> str:
         command = self.command_queue.enqueue("RESTART_LIVE_RESEARCH", requested_by=requested_by)
-        self.status_store.update(mode="paper", control_state="restart_requested")
+        status = self.status_store.read()
+        mode_updates = {} if status.get("runtime_layout") == "single_service" else {"mode": "paper"}
+        self.status_store.update(**mode_updates, control_state="restart_requested")
         return f"Queued safe command: {command.command} ({command.command_id})"
+
+    def export_data(self) -> ExportDataResult:
+        return self.data_exporter.build()
 
     def latest_report(self) -> str:
         status_path = self.status_store.read().get("latest_report_path")
@@ -145,11 +320,36 @@ class TelegramControlPanel:
         columns = [col for col in ["timestamp", "hypothesis_id", "symbol", "decision", "block_reason"] if col in df.columns]
         return f"Recent events: {latest}\n" + df[columns].tail(15).to_markdown(index=False)
 
+    def live_status(self) -> str:
+        return self.live_reporter.live_status()
+
+    def source(self) -> str:
+        return self.live_reporter.source()
+
+    def open_trades(self) -> str:
+        return self.live_reporter.open_trades()
+
+    def closed_trades(self) -> str:
+        return self.live_reporter.closed_trades()
+
+    def gates(self) -> str:
+        return self.live_reporter.gates()
+
     def help(self) -> str:
         return "\n".join(
             [
                 "Available commands:",
                 "/start",
+                "/live_start",
+                "/live_stop",
+                "/live_status",
+                "/live_restart",
+                "/settings",
+                "/diagnostics",
+                "/source",
+                "/open_trades",
+                "/closed_trades",
+                "/gates",
                 "/start_live",
                 "/status",
                 "/safety",
@@ -160,6 +360,7 @@ class TelegramControlPanel:
                 "/suggestions",
                 "/portfolio",
                 "/events",
+                "/export_data",
                 "/help",
             ]
         )
@@ -172,6 +373,12 @@ class TelegramControlPanel:
 
     def main_keyboard(self) -> dict:
         return main_control_keyboard()
+
+    def diagnostics_keyboard(self) -> dict:
+        return diagnostics_keyboard()
+
+    def _default_live_symbols(self, status: dict) -> list[str]:
+        return configured_universe()
 
     def _write_stop_report(self, command_id: str) -> Path:
         reports_dir = self.data_root / "demo_reports"
@@ -210,3 +417,29 @@ class TelegramControlPanel:
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
+
+    def _runtime_duration(self, status: dict) -> str:
+        started_at = status.get("started_at")
+        if not started_at:
+            return "N/A"
+        try:
+            started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            seconds = max(0, int((datetime.now(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()))
+        except (TypeError, ValueError):
+            return "N/A"
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _last_error_class(self, errors: object) -> str:
+        if not isinstance(errors, list) or not errors:
+            return "N/A"
+        latest = errors[-1]
+        value = latest.get("error") if isinstance(latest, dict) else latest
+        text = str(value or "N/A").splitlines()[0]
+        error_class = text.split(":", maxsplit=1)[0].strip()
+        if error_class.replace(".", "").replace("_", "").isalnum() and " " not in error_class:
+            return error_class
+        return "RecordedError"

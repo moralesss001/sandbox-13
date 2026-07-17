@@ -6,11 +6,20 @@ from pathlib import Path
 from typing import Any
 
 from .binance_data import get_latest_klines
+from .candidate_sources import (
+    CandidateSourceType,
+    SIMPLIFIED_PLACEHOLDER_METADATA,
+    ensure_supported_candidate_source,
+    metadata_for_candidate_source,
+)
 from .command_queue import CommandQueue
 from .execution_safety import validate_api_mode
 from .hypothesis_runner import HypothesisRunner
+from .live_paper_storage import LivePaperStorage
 from .runtime_status import RuntimeStatusStore, portfolio_counts, utc_now
 from .signal_adapter import signal_from_klines
+from .production_like_raw_source import production_like_raw_signal_from_klines
+from .universe import CONTRACT_UNIVERSE, CONTRACT_UNIVERSE_NAME
 
 
 class LiveResearchEngine:
@@ -22,8 +31,9 @@ class LiveResearchEngine:
         command_queue: CommandQueue | None = None,
     ):
         self.config = config or {}
-        self.data_root = Path(data_root)
-        self.status_store = status_store or RuntimeStatusStore(self.data_root / "runtime/status.json")
+        self.storage = LivePaperStorage(data_root)
+        self.data_root = self.storage.data_root
+        self.status_store = status_store or RuntimeStatusStore(self.storage.runtime_status_path)
         self.command_queue = command_queue or CommandQueue(self.data_root / "runtime/commands.jsonl")
         self.public_base_url = self.config.get("api", {}).get("public_base_url", "https://fapi.binance.com")
         self.api_mode = validate_api_mode(
@@ -40,8 +50,13 @@ class LiveResearchEngine:
         interval_sec: int = 60,
         max_iterations: int = 1,
         run_forever: bool = False,
+        candidate_source: str = CandidateSourceType.SIMPLIFIED_PLACEHOLDER.value,
     ) -> dict[str, Any]:
+        if timeframe != "15m":
+            raise ValueError("Live Paper Lifecycle MVP supports 15m timeframe only.")
+        source_metadata = self._live_source_metadata(candidate_source)
         paper_cfg = self.config.get("paper_trading", {})
+        closed_signal_ids = self.storage.closed_signal_ids()
         runner = HypothesisRunner(
             starting_balance_usdt=float(paper_cfg.get("starting_balance_usdt", 1000)),
             default_position_size_usdt=float(paper_cfg.get("default_position_size_usdt", 100)),
@@ -50,23 +65,93 @@ class LiveResearchEngine:
             slippage_pct=float(paper_cfg.get("slippage_pct", 0.0005)),
             intrabar_policy=str(paper_cfg.get("intrabar_policy", "conservative")),
             data_root=self.data_root,
+            known_closed_signal_ids=closed_signal_ids,
         )
+        self.storage.restore_open_positions(runner.portfolios, closed_signal_ids=closed_signal_ids)
+        self.storage.save_open_positions(runner.portfolios)
+        self.storage.append_closed_trades([])
         status = self.status_store.read()
+        is_single_service = status.get("runtime_layout") == "single_service"
         last_processed = dict(status.get("last_processed_candles") or {})
+        ignored_short_candidates_count = int(status.get("ignored_short_candidates_count") or 0)
+        rejected_candidates_count = int(status.get("rejected_candidates_count") or 0)
+        raw_candidates_lifetime = int(
+            status.get("raw_candidates_lifetime", status.get("raw_candidates_count", 0)) or 0
+        )
+        raw_candidates_current_run = 0
+        production_would_allow_count = int(status.get("production_would_allow_count") or 0)
+        production_would_block_count = int(status.get("production_would_block_count") or 0)
+        shadow_blocked_but_tracked_count = int(status.get("shadow_blocked_but_tracked_count") or 0)
+        shadow_gate_block_counts = dict(
+            status.get("shadow_gate_block_counts") or {"rsi_gate": 0, "market_mode_15m_gate": 0}
+        )
+        last_shadow_block_reasons = list(status.get("last_shadow_block_reasons") or [])
         symbols = [symbol.upper() for symbol in symbols]
+        configured_symbols = list(symbols)
+        configured_universe_name = (
+            CONTRACT_UNIVERSE_NAME if tuple(configured_symbols) == CONTRACT_UNIVERSE else "explicit_runtime"
+        )
+        active_symbols: set[str] = set()
+        unavailable_symbols: set[str] = set()
+        unavailable_symbol_reasons: dict[str, str] = {}
+        open_count, _ = portfolio_counts(runner.portfolios)
+        closed_trades_lifetime = self.storage.closed_trades_count()
+        diagnostics = self.storage.diagnostics()
+        diagnostics["paths_exist"]["runtime_status"] = True
         self.status_store.write(
             {
                 **status,
-                "mode": self.api_mode,
+                "mode": "sandbox_run_all" if is_single_service else "live_paper_lifecycle_mvp",
+                "interface_target": "telegram",
+                "cli_is_fallback": True,
                 "started_at": status.get("started_at") or utc_now(),
                 "symbols": symbols,
+                "configured_universe": configured_universe_name,
+                "configured_symbols": configured_symbols,
+                "configured_symbols_count": len(configured_symbols),
+                "active_symbols": [],
+                "active_symbols_count": 0,
+                "unavailable_symbols": [],
+                "unavailable_symbols_count": 0,
+                "unavailable_symbol_reasons": {},
                 "timeframe": timeframe,
+                "direction": "LONG_ONLY" if is_single_service else "LONG",
+                "candidate_mode": source_metadata.candidate_source,
+                **source_metadata.as_status_fields(),
+                "live_direction_policy": "LONG_ONLY",
                 "last_processed_candles": last_processed,
+                "open_virtual_positions_count": open_count,
+                "open_positions_count": open_count,
+                "open_positions_current": open_count,
+                "closed_trades_count": closed_trades_lifetime,
+                "closed_trades_lifetime": closed_trades_lifetime,
+                "ignored_short_candidates_count": ignored_short_candidates_count,
+                "rejected_candidates_count": rejected_candidates_count,
+                "shadow_gates_enabled": True,
+                "raw_candidates_count": raw_candidates_lifetime,
+                "raw_candidates_lifetime": raw_candidates_lifetime,
+                "raw_candidates_current_run": raw_candidates_current_run,
+                "production_would_allow_count": production_would_allow_count,
+                "production_would_block_count": production_would_block_count,
+                "shadow_blocked_but_tracked_count": shadow_blocked_but_tracked_count,
+                "shadow_gate_block_counts": shadow_gate_block_counts,
+                "last_shadow_block_reasons": last_shadow_block_reasons[-20:],
+                "storage_paths": self.storage.paths(),
+                **diagnostics,
+                "research_pack_2_enabled": False,
+                "checkpoint_progress": {
+                    "closed_trades_count": closed_trades_lifetime,
+                    "next_checkpoint": self._next_checkpoint(closed_trades_lifetime),
+                },
                 "safety_status": {
                     "api_mode": self.api_mode,
                     "allow_real_orders": bool(self.config.get("safety", {}).get("allow_real_orders", False)),
                     "allow_testnet_orders": bool(self.config.get("safety", {}).get("allow_testnet_orders", False)),
                     "telegram_read_only": True,
+                    "public_data_only": True,
+                    "private_api_used": False,
+                    "real_orders_enabled": False,
+                    "testnet_orders_enabled": False,
                 },
             }
         )
@@ -76,13 +161,22 @@ class LiveResearchEngine:
             index += 1
             control_action = self._control_action()
             if control_action in {"STOP_LIVE_RESEARCH", "RESTART_LIVE_RESEARCH"}:
+                self.storage.save_open_positions(runner.portfolios)
                 paths = runner.save_artifacts()
-                open_count, closed_count = portfolio_counts(runner.portfolios)
+                open_count, _ = portfolio_counts(runner.portfolios)
+                closed_trades_lifetime = self.storage.closed_trades_count()
                 report_path = self._write_engine_stop_report(runner, paths, reason=control_action)
                 self.status_store.update(
                     control_state="stopped" if control_action == "STOP_LIVE_RESEARCH" else "restart_requested",
+                    open_virtual_positions_count=open_count,
                     open_positions_count=open_count,
-                    closed_trades_count=closed_count,
+                    open_positions_current=open_count,
+                    closed_trades_count=closed_trades_lifetime,
+                    closed_trades_lifetime=closed_trades_lifetime,
+                    raw_candidates_count=raw_candidates_lifetime,
+                    raw_candidates_lifetime=raw_candidates_lifetime,
+                    raw_candidates_current_run=raw_candidates_current_run,
+                    **self.storage.diagnostics(),
                     latest_report_path=str(report_path),
                     last_iteration_at=utc_now(),
                 )
@@ -91,32 +185,130 @@ class LiveResearchEngine:
                     "events": runner.events,
                     "metrics": runner.metrics(),
                     "paths": {**paths, "final_stop_report": str(report_path)},
-                    "signal_source": "research_simplified_live",
+                    "signal_source": self._signal_source_name(source_metadata.candidate_source),
+                    **self._candidate_result_fields(source_metadata),
                 }
             for symbol in symbols:
                 try:
                     klines = get_latest_klines(symbol, timeframe, limit=200, base_url=self.public_base_url)
-                    self._save_live_market(symbol, timeframe, klines)
                     closed = self._latest_closed_klines(klines)
-                    if closed.empty:
-                        continue
+                except Exception as exc:  # noqa: BLE001 - isolate one unavailable market-data symbol.
+                    self._mark_symbol_unavailable(
+                        symbol,
+                        type(exc).__name__,
+                        configured_symbols,
+                        active_symbols,
+                        unavailable_symbols,
+                        unavailable_symbol_reasons,
+                    )
+                    self.status_store.append_error(f"{symbol} {timeframe}: {exc}")
+                    continue
+
+                if klines.empty or closed.empty:
+                    reason = "NoData" if klines.empty else "NoClosedCandles"
+                    self._mark_symbol_unavailable(
+                        symbol,
+                        reason,
+                        configured_symbols,
+                        active_symbols,
+                        unavailable_symbols,
+                        unavailable_symbol_reasons,
+                    )
+                    self.status_store.append_error(f"{symbol} {timeframe}: {reason}")
+                    continue
+
+                active_symbols.add(symbol)
+                unavailable_symbols.discard(symbol)
+                unavailable_symbol_reasons.pop(symbol, None)
+                self._write_universe_availability(
+                    configured_symbols,
+                    active_symbols,
+                    unavailable_symbols,
+                    unavailable_symbol_reasons,
+                )
+
+                try:
+                    self._save_live_market(symbol, timeframe, klines)
                     close_time = str(closed.iloc[-1].get("close_time"))
                     key = f"{symbol}:{timeframe}"
                     if last_processed.get(key) == close_time:
                         continue
-                    signal = signal_from_klines(symbol, timeframe, closed)
+                    current_candle = closed.iloc[-1].to_dict()
+                    closed_trades = self._update_open_positions(runner, symbol, current_candle)
+                    self.storage.append_closed_trades(closed_trades)
+                    self.storage.save_open_positions(runner.portfolios)
+                    signal = self._build_signal(symbol, timeframe, closed, candidate_source)
                     if signal:
-                        runner.process_signal(signal, close_from_history=False)
-                        last_processed[key] = close_time
-                except Exception as exc:  # noqa: BLE001 - status file should capture transient API errors.
-                    self.status_store.append_error(f"{symbol} {timeframe}: {exc}")
+                        raw_candidates_lifetime += 1
+                        raw_candidates_current_run += 1
+                        if signal.production_would_allow:
+                            production_would_allow_count += 1
+                        else:
+                            production_would_block_count += 1
+                            last_shadow_block_reasons.extend(signal.production_block_reasons)
+                            for gate in signal.shadow_gates:
+                                if gate.get("would_block"):
+                                    name = str(gate.get("gate_name"))
+                                    shadow_gate_block_counts[name] = int(shadow_gate_block_counts.get(name, 0)) + 1
+                        try:
+                            ensure_supported_candidate_source(signal.candidate_source)
+                        except ValueError as exc:
+                            rejected_candidates_count += 1
+                            self.status_store.append_error(str(exc))
+                            self.status_store.update(last_rejected_candidate_reason=str(exc))
+                            last_processed[key] = close_time
+                            continue
+                        if signal.direction.upper() != "LONG":
+                            ignored_short_candidates_count += 1
+                            rejected_candidates_count += 1
+                            self.status_store.update(last_rejected_candidate_reason="short_disabled_live_paper_mvp")
+                        else:
+                            if not signal.production_would_allow:
+                                shadow_blocked_but_tracked_count += 1
+                            runner.process_signal(signal, close_from_history=False)
+                            self.storage.save_open_positions(runner.portfolios)
+                    last_processed[key] = close_time
+                except Exception as exc:  # noqa: BLE001 - keep other symbols running without misclassifying data.
+                    self.status_store.append_error(f"{symbol} {timeframe} internal: {type(exc).__name__}")
             paths = runner.save_artifacts()
-            open_count, closed_count = portfolio_counts(runner.portfolios)
+            open_count, _ = portfolio_counts(runner.portfolios)
+            closed_trades_lifetime = self.storage.closed_trades_count()
             self.status_store.update(
                 last_iteration_at=utc_now(),
                 last_processed_candles=last_processed,
+                last_processed_candle_time=max(last_processed.values()) if last_processed else None,
+                open_virtual_positions_count=open_count,
                 open_positions_count=open_count,
-                closed_trades_count=closed_count,
+                open_positions_current=open_count,
+                closed_trades_count=closed_trades_lifetime,
+                closed_trades_lifetime=closed_trades_lifetime,
+                ignored_short_candidates_count=ignored_short_candidates_count,
+                rejected_candidates_count=rejected_candidates_count,
+                shadow_gates_enabled=True,
+                raw_candidates_count=raw_candidates_lifetime,
+                raw_candidates_lifetime=raw_candidates_lifetime,
+                raw_candidates_current_run=raw_candidates_current_run,
+                production_would_allow_count=production_would_allow_count,
+                production_would_block_count=production_would_block_count,
+                shadow_blocked_but_tracked_count=shadow_blocked_but_tracked_count,
+                shadow_gate_block_counts=shadow_gate_block_counts,
+                last_shadow_block_reasons=last_shadow_block_reasons[-20:],
+                configured_symbols=configured_symbols,
+                configured_symbols_count=len(configured_symbols),
+                active_symbols=self._ordered_symbols(configured_symbols, active_symbols),
+                active_symbols_count=len(active_symbols),
+                unavailable_symbols=self._ordered_symbols(configured_symbols, unavailable_symbols),
+                unavailable_symbols_count=len(unavailable_symbols),
+                unavailable_symbol_reasons=dict(unavailable_symbol_reasons),
+                candidate_mode=source_metadata.candidate_source,
+                **source_metadata.as_status_fields(),
+                live_direction_policy="LONG_ONLY",
+                storage_paths=self.storage.paths(),
+                **self.storage.diagnostics(),
+                checkpoint_progress={
+                    "closed_trades_count": closed_trades_lifetime,
+                    "next_checkpoint": self._next_checkpoint(closed_trades_lifetime),
+                },
                 latest_report_path=self.status_store.read().get("latest_report_path"),
             )
             if run_forever or index < max(1, int(max_iterations)):
@@ -126,8 +318,97 @@ class LiveResearchEngine:
             "events": runner.events,
             "metrics": runner.metrics(),
             "paths": paths,
-            "signal_source": "research_simplified_live",
+            "signal_source": self._signal_source_name(source_metadata.candidate_source),
+            "gate_outcome_analytics": self._gate_outcome_analytics(runner),
+            **self._candidate_result_fields(source_metadata),
         }
+
+    def _update_open_positions(self, runner: HypothesisRunner, symbol: str, candle: dict[str, Any]) -> list:
+        closed_trades = []
+        for broker in runner.brokers.values():
+            closed_trades.extend(broker.update_positions(candle, symbol=symbol))
+        return closed_trades
+
+    def _next_checkpoint(self, closed_trades_count: int) -> int:
+        return ((int(closed_trades_count) // 30) + 1) * 30
+
+    def _write_universe_availability(
+        self,
+        configured_symbols: list[str],
+        active_symbols: set[str],
+        unavailable_symbols: set[str],
+        unavailable_symbol_reasons: dict[str, str],
+    ) -> None:
+        self.status_store.update(
+            symbols=configured_symbols,
+            configured_symbols=configured_symbols,
+            configured_symbols_count=len(configured_symbols),
+            active_symbols=self._ordered_symbols(configured_symbols, active_symbols),
+            active_symbols_count=len(active_symbols),
+            unavailable_symbols=self._ordered_symbols(configured_symbols, unavailable_symbols),
+            unavailable_symbols_count=len(unavailable_symbols),
+            unavailable_symbol_reasons=dict(unavailable_symbol_reasons),
+        )
+
+    def _mark_symbol_unavailable(
+        self,
+        symbol: str,
+        reason: str,
+        configured_symbols: list[str],
+        active_symbols: set[str],
+        unavailable_symbols: set[str],
+        unavailable_symbol_reasons: dict[str, str],
+    ) -> None:
+        active_symbols.discard(symbol)
+        unavailable_symbols.add(symbol)
+        unavailable_symbol_reasons[symbol] = reason
+        self._write_universe_availability(
+            configured_symbols,
+            active_symbols,
+            unavailable_symbols,
+            unavailable_symbol_reasons,
+        )
+
+    def _ordered_symbols(self, configured_symbols: list[str], selected: set[str]) -> list[str]:
+        return [symbol for symbol in configured_symbols if symbol in selected]
+
+    def _candidate_result_fields(self, source_metadata=SIMPLIFIED_PLACEHOLDER_METADATA) -> dict[str, Any]:
+        return {
+            **source_metadata.as_status_fields(),
+            "candidate_mode": source_metadata.candidate_source,
+            "live_direction_policy": "LONG_ONLY",
+            "shadow_gates_enabled": True,
+        }
+
+    def _signal_source_name(self, candidate_source: str) -> str:
+        if candidate_source == CandidateSourceType.PRODUCTION_LIKE_RAW.value:
+            return "production_like_raw_live"
+        return "research_simplified_live"
+
+    def _live_source_metadata(self, candidate_source: str):
+        metadata = metadata_for_candidate_source(candidate_source)
+        if metadata.candidate_source not in {
+            CandidateSourceType.SIMPLIFIED_PLACEHOLDER.value,
+            CandidateSourceType.PRODUCTION_LIKE_RAW.value,
+        }:
+            raise ValueError(f"candidate_source is not implemented for live-research: {candidate_source}")
+        return metadata
+
+    def _build_signal(self, symbol: str, timeframe: str, closed, candidate_source: str):
+        ensure_supported_candidate_source(candidate_source)
+        if candidate_source == CandidateSourceType.SIMPLIFIED_PLACEHOLDER.value:
+            return signal_from_klines(symbol, timeframe, closed)
+        if candidate_source == CandidateSourceType.PRODUCTION_LIKE_RAW.value:
+            return production_like_raw_signal_from_klines(symbol, timeframe, closed)
+        raise ValueError(f"candidate_source is not implemented for live-research: {candidate_source}")
+
+    def _gate_outcome_analytics(self, runner: HypothesisRunner) -> dict[str, int]:
+        from .gate_analytics import summarize_gate_outcomes
+
+        trades = []
+        for portfolio in runner.portfolios.values():
+            trades.extend(portfolio.closed_trades)
+        return summarize_gate_outcomes(trades)
 
     def mark_latest_report(self, report_path: str | Path) -> None:
         self.status_store.update(latest_report_path=str(report_path))
@@ -158,7 +439,7 @@ class LiveResearchEngine:
             self.status_store.update(processed_command_ids=sorted(processed), last_control_command=command.command)
             if command.command in {"STOP_LIVE_RESEARCH", "RESTART_LIVE_RESEARCH"}:
                 return command.command
-            if command.command == "START_LIVE_RESEARCH":
+            if command.command in {"START_LIVE_RESEARCH", "START_LIVE_PAPER"}:
                 self.status_store.update(control_state="running")
         return None
 
@@ -166,7 +447,8 @@ class LiveResearchEngine:
         reports_dir = self.data_root / "demo_reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         path = reports_dir / f"engine_stop_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        open_count, closed_count = portfolio_counts(runner.portfolios)
+        open_count, closed_current_run = portfolio_counts(runner.portfolios)
+        closed_lifetime = self.storage.closed_trades_count()
         lines = [
             "# Crypto13Research Engine Stop Report",
             "",
@@ -174,7 +456,8 @@ class LiveResearchEngine:
             f"- Reason: `{reason}`",
             f"- Generated at: {datetime.now().isoformat(timespec='seconds')}",
             f"- Open virtual positions: {open_count}",
-            f"- Closed virtual trades: {closed_count}",
+            f"- Closed virtual trades (current run): {closed_current_run}",
+            f"- Closed virtual trades (lifetime): {closed_lifetime}",
             "",
             "## Flushed artifacts",
             f"- Paper trades: `{paths.get('paper_trades', 'n/a')}`",

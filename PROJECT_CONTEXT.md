@@ -254,3 +254,15 @@ User -> Crypto13 HQ -> Coder sub-agent -> Tester sub-agent -> Crypto13 HQ -> Use
 ```
 
 `handoffs/` remains as audit trail and fallback, but the normal workflow is now orchestrated directly from Crypto13 HQ through sub-agents.
+
+## Authoritative Workspace Policy
+
+The only authoritative Crypto13 Research Sandbox workspace is:
+
+`/Users/maksimmatveev/Desktop/Crypto13 Research Sandbox/crypto13_research`
+
+- All future development must be performed in this Desktop repository.
+- Separate temporary Git working copies are prohibited.
+- `/tmp` and `/private/tmp` may be used only for transient test artifacts, never as a source of truth.
+- Before risky changes, preserve work with Git history, a branch, a verified bundle, or a binary patch instead of a hidden working copy.
+- Production Crypto13 remains outside this workspace and must not be modified.

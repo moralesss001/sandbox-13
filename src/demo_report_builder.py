@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+from .gate_analytics import summarize_gate_outcomes
+
 
 def _fmt(value: Any) -> str:
     if value is None:
@@ -60,6 +62,15 @@ def build_demo_report(
     candidates = [item for item in metrics.values() if item.get("candidate_for_testnet")]
     low_sample = [item for item in metrics.values() if item.get("total_trades", 0) < 30]
     rejected = [item for item in metrics.values() if not item.get("candidate_for_testnet")]
+    candidate_source = result.get("candidate_source", "unknown")
+    candidate_source_version = result.get("candidate_source_version", "unknown")
+    candidate_source_warning = result.get("candidate_source_warning") or ""
+    edge_conclusions_allowed = result.get("edge_conclusions_allowed", "unknown")
+    live_direction_policy = result.get("live_direction_policy", "unknown")
+    closed_trades = []
+    for portfolio in result.get("portfolios", {}).values():
+        closed_trades.extend(getattr(portfolio, "closed_trades", []))
+    gate_outcomes = result.get("gate_outcome_analytics") or summarize_gate_outcomes(closed_trades)
 
     lines = [
         "# Crypto13Research Demo Report",
@@ -71,68 +82,79 @@ def build_demo_report(
         "",
         "## 2. Signal source",
         f"`signal_source = {signal_source}`",
+        f"`candidate_source = {candidate_source}`",
+        f"`candidate_source_version = {candidate_source_version}`",
+        f"`edge_conclusions_allowed = {edge_conclusions_allowed}`",
+        f"`live_direction_policy = {live_direction_policy}`",
+        f"- Candidate source warning: {candidate_source_warning or 'n/a'}",
         "",
-        "## 3. Baseline metrics",
+        "## 3. Shadow gate analytics",
+        f"- gate_saved_from_loss: {_fmt(gate_outcomes.get('gate_saved_from_loss', 0))}",
+        f"- gate_missed_profit: {_fmt(gate_outcomes.get('gate_missed_profit', 0))}",
+        f"- gate_allowed_loss: {_fmt(gate_outcomes.get('gate_allowed_loss', 0))}",
+        f"- gate_allowed_profit: {_fmt(gate_outcomes.get('gate_allowed_profit', 0))}",
+        "- Shadow gates are analytics-only in sandbox and are not hard filters.",
+        "",
+        "## 4. Baseline metrics",
         "\n".join(f"- {key}: {_fmt(value)}" for key, value in baseline.items()) if baseline else "_No baseline._",
         "",
-        "## 4. Hypothesis leaderboard",
+        "## 5. Hypothesis leaderboard",
         _metrics_table(metrics),
         "",
-        "## 5. Baseline vs filters",
+        "## 6. Baseline vs filters",
         f"- Baseline net_R: {_fmt(baseline.get('net_R'))}",
         f"- Best filter net_R: {_fmt(best_net.get('net_R'))}",
         "",
-        "## 6. Best hypothesis by net_R",
+        "## 7. Best hypothesis by net_R",
         f"`{best_net.get('hypothesis_id', 'n/a')}` net_R={_fmt(best_net.get('net_R'))}",
         "",
-        "## 7. Best hypothesis by PF",
+        "## 8. Best hypothesis by PF",
         f"`{best_pf.get('hypothesis_id', 'n/a')}` PF={_fmt(best_pf.get('profit_factor'))}",
         "",
-        "## 8. Best hypothesis by max_drawdown",
+        "## 9. Best hypothesis by max_drawdown",
         f"`{best_dd.get('hypothesis_id', 'n/a')}` max_drawdown_R={_fmt(best_dd.get('max_drawdown_R'))}",
         "",
-        "## 9. Worst hypothesis",
+        "## 10. Worst hypothesis",
         f"`{worst.get('hypothesis_id', 'n/a')}` net_R={_fmt(worst.get('net_R'))}",
         "",
-        "## 10. Trades per hypothesis",
+        "## 11. Trades per hypothesis",
         "\n".join(f"- {hid}: {m.get('total_trades', 0)}" for hid, m in metrics.items()),
         "",
-        "## 11. Blocked trades per hypothesis",
+        "## 12. Blocked trades per hypothesis",
         "\n".join(f"- {hid}: {m.get('trades_blocked', 0)}" for hid, m in metrics.items()),
         "",
-        "## 12. Missed wins",
+        "## 13. Missed wins",
         "\n".join(f"- {hid}: {m.get('missed_wins', 0)}" for hid, m in metrics.items()),
         "",
-        "## 13. Saved losses",
+        "## 14. Saved losses",
         "\n".join(f"- {hid}: {m.get('blocked_losses', 0)}" for hid, m in metrics.items()),
         "",
-        "## 14. Portfolio equity summary",
+        "## 15. Portfolio equity summary",
         "\n".join(
             f"- {hid}: balance={_fmt(portfolio.balance)} net_R={_fmt(portfolio.net_R)}"
             for hid, portfolio in result.get("portfolios", {}).items()
         ),
         "",
-        "## 15. Hypotheses that need more data",
+        "## 16. Hypotheses that need more data",
         "\n".join(f"- {item.get('hypothesis_id')}: trades={item.get('total_trades')}" for item in low_sample)
         or "- none",
         "",
-        "## 16. Hypotheses rejected",
+        "## 17. Hypotheses rejected",
         "\n".join(f"- {item.get('hypothesis_id')}" for item in rejected) or "- none",
         "",
-        "## 17. Candidates for testnet execution",
+        "## 18. Candidates for testnet execution",
         "\n".join(f"- {item.get('hypothesis_id')}" for item in candidates) or "- none",
         "",
-        "## 18. Safety status",
+        "## 19. Safety status",
         "- API_MODE default: paper",
         "- ALLOW_REAL_ORDERS: false",
         "- Testnet orders require allow flag and explicit CLI confirmation.",
         "- Production trading is disabled in Crypto13Research.",
         "",
-        "## 19. What NOT to deploy yet",
+        "## 20. What NOT to deploy yet",
         "- Do not deploy any hypothesis to production from this report.",
         "- Do not treat paper/testnet candidates as production proof.",
         "- Send all production decisions back to Crypto13 HQ.",
     ]
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report_path
-

@@ -16,6 +16,12 @@ __pycache__/
 logs/
 
 # Generated research artifacts.
+/data/
+/reports/
+/export/
+/github_deploy_package/
+/handoffs/documents_migration_archive/
+/handoffs/CODER_TASK_DEMO_ENGINE.md
 data/demo_reports/demo_report_*.md
 data/hypothesis_events/hypothesis_events_*.csv
 data/live_market/live_market_*.csv

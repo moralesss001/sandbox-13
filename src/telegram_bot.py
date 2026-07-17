@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 import requests
 
 from .telegram_config import load_telegram_config_from_env
+from .telegram_control import TelegramControlPanel
+from .telegram_buttons import TelegramResponse
 from .telegram_handlers import TelegramHandlers
 
 
@@ -27,16 +30,18 @@ class TelegramBot:
                     user = callback.get("from") or {}
                     message = callback.get("message") or {}
                     chat = message.get("chat") or {}
-                    response = self.handlers.handle_callback(callback.get("data", ""), user.get("id"))
+                    response = self.handlers.handle_callback(
+                        callback.get("data", ""), user.get("id"), chat.get("id")
+                    )
                     self._answer_callback(callback.get("id"))
-                    self._send_message(chat.get("id"), response.text, response.reply_markup)
+                    self._deliver_response(chat.get("id"), response)
                 else:
                     message = update.get("message") or {}
                     chat = message.get("chat") or {}
                     user = message.get("from") or {}
                     text = message.get("text") or ""
-                    response = self.handlers.handle_message(text, user.get("id"))
-                    self._send_message(chat.get("id"), response.text, response.reply_markup)
+                    response = self.handlers.handle_message(text, user.get("id"), chat.get("id"))
+                    self._deliver_response(chat.get("id"), response)
             if once:
                 return
             time.sleep(self.poll_interval_sec)
@@ -66,8 +71,48 @@ class TelegramBot:
             timeout=10,
         ).raise_for_status()
 
+    def _deliver_response(self, chat_id: int | str | None, response: TelegramResponse) -> None:
+        if not response.documents:
+            self._send_message(chat_id, response.text, response.reply_markup)
+            return
 
-def run_telegram_bot(once: bool = False) -> None:
+        self._send_message(chat_id, response.text)
+        sent: list[str] = []
+        missing: list[str] = []
+        for document in response.documents:
+            try:
+                delivered = self._send_document(chat_id, document)
+            except (OSError, requests.RequestException):
+                delivered = False
+            name = Path(document).name
+            (sent if delivered else missing).append(name)
+
+        lines = ["Export completed.", "", "Sent:"]
+        lines.extend(f"- {name}" for name in sent)
+        if not sent:
+            lines.append("- none")
+        if missing:
+            lines.extend(["", "Missing:"])
+            lines.extend(f"- {name}" for name in missing)
+        self._send_message(chat_id, "\n".join(lines), response.reply_markup)
+
+    def _send_document(self, chat_id: int | str | None, path: str) -> bool:
+        if chat_id is None:
+            return False
+        document_path = Path(path)
+        if not document_path.exists() or not document_path.is_file() or document_path.is_symlink():
+            return False
+        with document_path.open("rb") as handle:
+            requests.post(
+                f"{self.base_url}/sendDocument",
+                data={"chat_id": chat_id},
+                files={"document": (document_path.name, handle)},
+                timeout=30,
+            ).raise_for_status()
+        return True
+
+
+def run_telegram_bot(once: bool = False, data_root: str = "data") -> None:
     config = load_telegram_config_from_env()
-    handlers = TelegramHandlers(config)
+    handlers = TelegramHandlers(config, control=TelegramControlPanel(data_root=data_root))
     TelegramBot(config.token, handlers).run(once=once)

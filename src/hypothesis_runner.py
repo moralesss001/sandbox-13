@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .hypothesis_registry import HypothesisRegistry
-from .order_models import HypothesisDecisionType, SignalCandidate
+from .order_models import HypothesisDecisionType, SignalCandidate, ensure_candidate_id, hypothesis_signal_id
 from .paper_broker import PaperBroker
 from .portfolio import PaperPortfolio
 
@@ -33,6 +34,7 @@ class HypothesisRunner:
         slippage_pct: float = 0.0005,
         intrabar_policy: str = "conservative",
         data_root: str | Path = "data",
+        known_closed_signal_ids: set[str] | None = None,
     ):
         self.registry = registry or HypothesisRegistry()
         self.portfolios = {
@@ -47,6 +49,7 @@ class HypothesisRunner:
                 fee_rate=fee_rate,
                 slippage_pct=slippage_pct,
                 intrabar_policy=intrabar_policy,
+                known_closed_signal_ids=known_closed_signal_ids,
             )
             for hypothesis_id, portfolio in self.portfolios.items()
         }
@@ -54,21 +57,32 @@ class HypothesisRunner:
         self.data_root = Path(data_root)
 
     def process_signal(self, signal: SignalCandidate, close_from_history: bool = False) -> None:
+        candidate_id = ensure_candidate_id(signal)
         for hypothesis in self.registry.enabled():
             decision = hypothesis.decide(signal)
             event = {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "hypothesis_id": hypothesis.hypothesis_id,
+                "candidate_id": candidate_id,
+                "signal_id": hypothesis_signal_id(candidate_id, hypothesis.hypothesis_id),
                 "symbol": signal.symbol,
                 "timeframe": signal.timeframe,
                 "decision": decision.decision,
                 "block_reason": decision.block_reason or "",
                 "signal_source": signal.signal_source,
+                "candidate_source": signal.candidate_source,
+                "candidate_source_version": signal.candidate_source_version,
+                "is_placeholder": signal.is_placeholder,
+                "edge_conclusions_allowed": signal.edge_conclusions_allowed,
+                "direction_support": signal.direction_support,
                 "market_phase": signal.market_phase,
                 "session": signal.session,
                 "setup_type": signal.setup_type,
                 "rsi": signal.rsi,
                 "atr_pct": signal.atr_pct,
+                "production_would_allow": signal.production_would_allow,
+                "production_block_reasons": "|".join(signal.production_block_reasons),
+                "shadow_gate_block_reasons": "|".join(signal.shadow_gate_block_reasons),
                 "historical_result": signal.result or "",
             }
             self.events.append(event)
@@ -150,8 +164,18 @@ class HypothesisRunner:
         if not rows:
             target.write_text("", encoding="utf-8")
             return
+        rows = [self._serialize_row(row) for row in rows]
         fields = sorted({key for row in rows for key in row.keys()})
         with target.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             writer.writerows(rows)
+
+    def _serialize_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        for key in ["production_block_reasons", "shadow_gate_block_reasons"]:
+            value = row.get(key)
+            if isinstance(value, list):
+                row[key] = "|".join(str(item) for item in value)
+        if isinstance(row.get("shadow_gates"), list):
+            row["shadow_gates"] = json.dumps(row["shadow_gates"], ensure_ascii=False, sort_keys=True)
+        return row
