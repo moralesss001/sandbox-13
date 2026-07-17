@@ -8,7 +8,7 @@ WorkingDirectory=/opt/crypto13_research
 Environment=API_MODE=paper
 Environment=ALLOW_REAL_ORDERS=false
 Environment=ALLOW_TESTNET_ORDERS=false
-ExecStart=/usr/bin/python -m src.main live-research --symbols BTCUSDT,ETHUSDT --tf 15m --interval-sec 60 --run-forever
+ExecStart=/usr/bin/python -m src.main live-research --tf 15m --interval-sec 60 --run-forever
 Restart=on-failure
 
 [Install]

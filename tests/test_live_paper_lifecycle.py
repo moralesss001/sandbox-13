@@ -11,7 +11,8 @@ from src.runtime_status import RuntimeStatusStore
 from src.shadow_gates import attach_shadow_gate_metadata
 
 
-def _klines(close_time: int = 1_700_000_000_000, high: float = 101.0, low: float = 99.0) -> pd.DataFrame:
+def _klines(close_time=None, high: float = 101.0, low: float = 99.0) -> pd.DataFrame:
+    close_time = close_time or int(pd.Timestamp.now(tz="UTC").timestamp() * 1000) - 60_000
     rows = []
     for index in range(20):
         close = 100.0
@@ -139,9 +140,10 @@ def test_closed_trades_include_candidate_source_metadata(tmp_path):
 
 
 def test_live_lifecycle_restores_open_positions_and_closes_tp(monkeypatch, tmp_path):
+    close_time = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000) - 120_000
     calls = [
-        _klines(close_time=1_700_000_000_000, high=101.0, low=99.0),
-        _klines(close_time=1_700_000_100_000, high=111.0, low=99.0),
+        _klines(close_time=close_time, high=101.0, low=99.0),
+        _klines(close_time=close_time + 60_000, high=111.0, low=99.0),
     ]
     signals = [_signal(), None]
     monkeypatch.setattr("src.live_research_engine.get_latest_klines", lambda *args, **kwargs: calls.pop(0))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -67,7 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ],
         help="Live research candidate source",
     )
-    live.add_argument("--out", default="data/demo_reports", help="Demo report output directory")
+    live.add_argument("--out", default=None, help="Demo report output directory; defaults under CRYPTO13_DATA_ROOT")
 
     fetch = subparsers.add_parser("fetch-klines", help="Fetch Binance Futures public klines")
     fetch.add_argument("--symbol", required=True)
@@ -130,7 +131,9 @@ def main() -> None:
                 print(f"- {warning}")
     elif args.command == "live-research":
         symbols = [symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip()]
-        engine = LiveResearchEngine(config)
+        data_root = Path(os.getenv("CRYPTO13_DATA_ROOT", "data") or "data")
+        report_out = Path(args.out) if args.out else data_root / "demo_reports"
+        engine = LiveResearchEngine(config, data_root=data_root)
         result = engine.run(
             symbols=symbols,
             timeframe=args.tf,
@@ -141,7 +144,7 @@ def main() -> None:
         )
         report_path = build_demo_report(
             result,
-            out_dir=args.out,
+            out_dir=report_out,
             source_file="binance_public_rest",
             signal_source=result.get("signal_source", "research_simplified_live"),
         )

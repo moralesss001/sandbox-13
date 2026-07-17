@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .binance_data import get_latest_klines
+from .binance_data import get_exchange_info, get_latest_klines
 from .candidate_sources import (
     CandidateSourceType,
     SIMPLIFIED_PLACEHOLDER_METADATA,
@@ -23,6 +23,8 @@ from .universe import CONTRACT_UNIVERSE, CONTRACT_UNIVERSE_NAME
 
 
 class LiveResearchEngine:
+    MAX_CLOSED_CANDLE_AGE_MS = 30 * 60 * 1000
+
     def __init__(
         self,
         config: dict[str, Any] | None = None,
@@ -188,14 +190,44 @@ class LiveResearchEngine:
                     "signal_source": self._signal_source_name(source_metadata.candidate_source),
                     **self._candidate_result_fields(source_metadata),
                 }
+            try:
+                exchange_info = get_exchange_info(base_url=self.public_base_url)
+                exchange_symbols = self._exchange_symbols(exchange_info)
+            except Exception as exc:  # noqa: BLE001 - fail closed when eligibility cannot be verified.
+                for symbol in symbols:
+                    self._mark_symbol_unavailable(
+                        symbol,
+                        "exchange_info_request_failed",
+                        configured_symbols,
+                        active_symbols,
+                        unavailable_symbols,
+                        unavailable_symbol_reasons,
+                    )
+                self.status_store.append_error(f"exchangeInfo: {type(exc).__name__}")
+                paths = runner.save_artifacts()
+                self.status_store.update(last_iteration_at=utc_now())
+                if run_forever or index < max(1, int(max_iterations)):
+                    time.sleep(max(1, int(interval_sec)))
+                continue
+
             for symbol in symbols:
+                eligibility_reason = self._symbol_eligibility_reason(symbol, exchange_symbols)
+                if eligibility_reason:
+                    self._mark_symbol_unavailable(
+                        symbol,
+                        eligibility_reason,
+                        configured_symbols,
+                        active_symbols,
+                        unavailable_symbols,
+                        unavailable_symbol_reasons,
+                    )
+                    continue
                 try:
                     klines = get_latest_klines(symbol, timeframe, limit=200, base_url=self.public_base_url)
-                    closed = self._latest_closed_klines(klines)
                 except Exception as exc:  # noqa: BLE001 - isolate one unavailable market-data symbol.
                     self._mark_symbol_unavailable(
                         symbol,
-                        type(exc).__name__,
+                        "market_data_error",
                         configured_symbols,
                         active_symbols,
                         unavailable_symbols,
@@ -204,17 +236,46 @@ class LiveResearchEngine:
                     self.status_store.append_error(f"{symbol} {timeframe}: {exc}")
                     continue
 
-                if klines.empty or closed.empty:
-                    reason = "NoData" if klines.empty else "NoClosedCandles"
+                if klines.empty:
                     self._mark_symbol_unavailable(
                         symbol,
-                        reason,
+                        "empty_candles",
                         configured_symbols,
                         active_symbols,
                         unavailable_symbols,
                         unavailable_symbol_reasons,
                     )
-                    self.status_store.append_error(f"{symbol} {timeframe}: {reason}")
+                    self.status_store.append_error(f"{symbol} {timeframe}: empty_candles")
+                    continue
+
+                try:
+                    self._validate_candle_frame(klines)
+                    closed = self._latest_closed_klines(klines)
+                    if closed.empty:
+                        raise ValueError("No closed candle")
+                    last_close_time = int(closed.iloc[-1]["close_time"])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    self._mark_symbol_unavailable(
+                        symbol,
+                        "malformed_candles",
+                        configured_symbols,
+                        active_symbols,
+                        unavailable_symbols,
+                        unavailable_symbol_reasons,
+                    )
+                    self.status_store.append_error(f"{symbol} {timeframe}: malformed_candles")
+                    continue
+
+                if self._now_ms() - last_close_time > self.MAX_CLOSED_CANDLE_AGE_MS:
+                    self._mark_symbol_unavailable(
+                        symbol,
+                        "stale_closed_candle",
+                        configured_symbols,
+                        active_symbols,
+                        unavailable_symbols,
+                        unavailable_symbol_reasons,
+                    )
+                    self.status_store.append_error(f"{symbol} {timeframe}: stale_closed_candle")
                     continue
 
                 active_symbols.add(symbol)
@@ -372,6 +433,43 @@ class LiveResearchEngine:
     def _ordered_symbols(self, configured_symbols: list[str], selected: set[str]) -> list[str]:
         return [symbol for symbol in configured_symbols if symbol in selected]
 
+    def _exchange_symbols(self, exchange_info: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        rows = exchange_info.get("symbols")
+        if not isinstance(rows, list):
+            raise ValueError("Malformed Binance exchangeInfo response")
+        return {
+            str(row.get("symbol", "")).upper(): row
+            for row in rows
+            if isinstance(row, dict) and row.get("symbol")
+        }
+
+    def _symbol_eligibility_reason(
+        self,
+        symbol: str,
+        exchange_symbols: dict[str, dict[str, Any]],
+    ) -> str | None:
+        details = exchange_symbols.get(symbol.upper())
+        if details is None:
+            return "symbol_absent_exchange_info"
+        if details.get("status") != "TRADING":
+            return "symbol_status_not_trading"
+        if details.get("contractType") != "PERPETUAL":
+            return "symbol_not_perpetual"
+        if details.get("quoteAsset") != "USDT":
+            return "symbol_quote_asset_mismatch"
+        return None
+
+    def _now_ms(self) -> int:
+        return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    def _validate_candle_frame(self, klines) -> None:
+        required = {"open", "high", "low", "close", "volume", "close_time"}
+        if not required.issubset(klines.columns):
+            raise ValueError("Missing required candle columns")
+        latest = klines.iloc[-1]
+        for column in required:
+            float(latest[column])
+
     def _candidate_result_fields(self, source_metadata=SIMPLIFIED_PLACEHOLDER_METADATA) -> dict[str, Any]:
         return {
             **source_metadata.as_status_fields(),
@@ -425,7 +523,7 @@ class LiveResearchEngine:
     def _latest_closed_klines(self, klines):
         if klines.empty or "close_time" not in klines.columns:
             return klines.iloc[0:0].copy()
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = self._now_ms()
         closed = klines[klines["close_time"].astype("int64") <= now_ms].copy()
         return closed
 

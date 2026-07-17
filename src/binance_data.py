@@ -50,6 +50,15 @@ def get_latest_klines(symbol: str, interval: str, limit: int = 200, base_url: st
     return _request_klines({"symbol": symbol.upper(), "interval": interval, "limit": safe_limit}, base_url=base_url)
 
 
+def get_exchange_info(base_url: str = PUBLIC_BASE_URL, timeout: int = 10) -> dict[str, Any]:
+    response = requests.get(f"{base_url}/fapi/v1/exchangeInfo", timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or not isinstance(payload.get("symbols"), list):
+        raise ValueError("Malformed Binance exchangeInfo response")
+    return payload
+
+
 def get_server_time(base_url: str = PUBLIC_BASE_URL, timeout: int = 10) -> dict[str, Any]:
     response = requests.get(f"{base_url}/fapi/v1/time", timeout=timeout)
     response.raise_for_status()
