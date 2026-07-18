@@ -136,7 +136,7 @@ def test_closed_trades_include_candidate_source_metadata(tmp_path):
     assert "candidate_source" in text
     assert "production_like_raw" in text
     assert "candidate_source_version" in text
-    assert "v1" in text
+    assert "v2" in text
 
 
 def test_live_lifecycle_restores_open_positions_and_closes_tp(monkeypatch, tmp_path):
@@ -276,12 +276,12 @@ def test_production_like_raw_market_mode_remains_analytics_only_in_paper_flow(mo
 
     assert result["events"]
     assert result["candidate_source"] == "production_like_raw"
-    assert result["candidate_source_version"] == "v1"
+    assert result["candidate_source_version"] == "v2"
     assert result["is_placeholder"] is False
     assert result["edge_conclusions_allowed"] is False
     assert result["direction_support"] == "LONG_ONLY"
     assert status["candidate_source"] == "production_like_raw"
-    assert status["candidate_source_version"] == "v1"
+    assert status["candidate_source_version"] == "v2"
     assert status["is_placeholder"] is False
     assert status["edge_conclusions_allowed"] is False
     assert status["direction_support"] == "LONG_ONLY"
@@ -297,3 +297,111 @@ def test_production_like_raw_market_mode_remains_analytics_only_in_paper_flow(mo
     market_gate = next(gate for gate in position.shadow_gates if gate["gate_name"] == "market_mode_15m_gate")
     assert market_gate["reason"] == "market_mode_15m_no_trade"
     assert market_gate["severity"] == "analytics_only"
+
+
+def _parity_frame_15m(candle_range=1.0, rows=80, start=1_700_000_000_000):
+    return pd.DataFrame(
+        [
+            {
+                "open_time": start + index * 900_000,
+                "open": 99.8,
+                "high": 100 + candle_range / 2,
+                "low": 100 - candle_range / 2,
+                "close": 100.0,
+                "volume": 200.0 if index == rows - 1 else 100.0,
+                "close_time": start + (index + 1) * 900_000 - 1,
+                "quote_asset_volume": 1,
+                "number_of_trades": 1,
+                "taker_buy_base_volume": 1,
+                "taker_buy_quote_volume": 1,
+                "ignore": 0,
+            }
+            for index in range(rows)
+        ]
+    )
+
+
+def _parity_frame_1h(rows=80, start=1_699_700_000_000):
+    return pd.DataFrame(
+        [
+            {
+                "open_time": start + index * 3_600_000,
+                "open": 100 + index * 0.1 - 0.1,
+                "high": 100 + index * 0.1 + 0.5,
+                "low": 100 + index * 0.1 - 0.5,
+                "close": 100 + index * 0.1,
+                "volume": 100.0,
+                "close_time": start + (index + 1) * 3_600_000 - 1,
+                "quote_asset_volume": 1,
+                "number_of_trades": 1,
+                "taker_buy_base_volume": 1,
+                "taker_buy_quote_volume": 1,
+                "ignore": 0,
+            }
+            for index in range(rows)
+        ]
+    )
+
+
+def test_pre_candidate_rejection_creates_no_hypothesis_order(monkeypatch, tmp_path):
+    frame_15m = _parity_frame_15m(candle_range=0.4)
+    frame_1h = _parity_frame_1h()
+    monkeypatch.setattr(
+        "src.live_research_engine.get_latest_klines",
+        lambda _symbol, interval, **_kwargs: frame_1h.copy() if interval == "1h" else frame_15m.copy(),
+    )
+    monkeypatch.setattr(
+        LiveResearchEngine,
+        "_now_ms",
+        lambda _self: int(frame_15m.iloc[-1]["close_time"]) + 60_000,
+    )
+    store = RuntimeStatusStore(tmp_path / "runtime/runtime_status.json")
+    engine = LiveResearchEngine({"api": {"mode": "paper"}, "safety": {}}, data_root=tmp_path, status_store=store)
+
+    result = engine.run(
+        ["BTCUSDT"],
+        "15m",
+        max_iterations=1,
+        candidate_source="production_like_raw",
+    )
+
+    assert result["events"] == []
+    assert result["portfolios"]["baseline_rr15"].open_positions == []
+    assert store.read()["raw_candidates_current_run"] == 0
+
+
+def test_same_closed_candle_is_deduplicated_and_next_can_emit(monkeypatch, tmp_path):
+    first = _parity_frame_15m()
+    second = pd.concat(
+        [
+            first,
+            _parity_frame_15m(rows=81).iloc[[-1]],
+        ],
+        ignore_index=True,
+    )
+    frames = [first, first, second]
+    frame_1h = _parity_frame_1h()
+
+    def fetch(_symbol, interval, **_kwargs):
+        return frame_1h.copy() if interval == "1h" else frames.pop(0).copy()
+
+    monkeypatch.setattr("src.live_research_engine.get_latest_klines", fetch)
+    monkeypatch.setattr("src.live_research_engine.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        LiveResearchEngine,
+        "_now_ms",
+        lambda _self: int(second.iloc[-1]["close_time"]) + 60_000,
+    )
+    store = RuntimeStatusStore(tmp_path / "runtime/runtime_status.json")
+    engine = LiveResearchEngine({"api": {"mode": "paper"}, "safety": {}}, data_root=tmp_path, status_store=store)
+
+    result = engine.run(
+        ["BTCUSDT"],
+        "15m",
+        interval_sec=1,
+        max_iterations=3,
+        candidate_source="production_like_raw",
+    )
+
+    assert len(result["events"]) == 30
+    assert store.read()["raw_candidates_current_run"] == 2

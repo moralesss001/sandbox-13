@@ -222,8 +222,11 @@ class LiveResearchEngine:
                         unavailable_symbol_reasons,
                     )
                     continue
+                htf_klines = None
                 try:
                     klines = get_latest_klines(symbol, timeframe, limit=200, base_url=self.public_base_url)
+                    if candidate_source == CandidateSourceType.PRODUCTION_LIKE_RAW.value:
+                        htf_klines = get_latest_klines(symbol, "1h", limit=200, base_url=self.public_base_url)
                 except Exception as exc:  # noqa: BLE001 - isolate one unavailable market-data symbol.
                     self._mark_symbol_unavailable(
                         symbol,
@@ -236,7 +239,10 @@ class LiveResearchEngine:
                     self.status_store.append_error(f"{symbol} {timeframe}: {exc}")
                     continue
 
-                if klines.empty:
+                if klines.empty or (
+                    candidate_source == CandidateSourceType.PRODUCTION_LIKE_RAW.value
+                    and (htf_klines is None or htf_klines.empty)
+                ):
                     self._mark_symbol_unavailable(
                         symbol,
                         "empty_candles",
@@ -250,6 +256,8 @@ class LiveResearchEngine:
 
                 try:
                     self._validate_candle_frame(klines)
+                    if htf_klines is not None:
+                        self._validate_candle_frame(htf_klines)
                     closed = self._latest_closed_klines(klines)
                     if closed.empty:
                         raise ValueError("No closed candle")
@@ -298,7 +306,13 @@ class LiveResearchEngine:
                     closed_trades = self._update_open_positions(runner, symbol, current_candle)
                     self.storage.append_closed_trades(closed_trades)
                     self.storage.save_open_positions(runner.portfolios)
-                    signal = self._build_signal(symbol, timeframe, closed, candidate_source)
+                    signal = self._build_signal(
+                        symbol,
+                        timeframe,
+                        closed,
+                        candidate_source,
+                        htf_klines=htf_klines,
+                    )
                     if signal:
                         raw_candidates_lifetime += 1
                         raw_candidates_current_run += 1
@@ -492,12 +506,24 @@ class LiveResearchEngine:
             raise ValueError(f"candidate_source is not implemented for live-research: {candidate_source}")
         return metadata
 
-    def _build_signal(self, symbol: str, timeframe: str, closed, candidate_source: str):
+    def _build_signal(
+        self,
+        symbol: str,
+        timeframe: str,
+        closed,
+        candidate_source: str,
+        htf_klines=None,
+    ):
         ensure_supported_candidate_source(candidate_source)
         if candidate_source == CandidateSourceType.SIMPLIFIED_PLACEHOLDER.value:
             return signal_from_klines(symbol, timeframe, closed)
         if candidate_source == CandidateSourceType.PRODUCTION_LIKE_RAW.value:
-            return production_like_raw_signal_from_klines(symbol, timeframe, closed)
+            return production_like_raw_signal_from_klines(
+                symbol,
+                timeframe,
+                closed,
+                htf_klines=htf_klines,
+            )
         raise ValueError(f"candidate_source is not implemented for live-research: {candidate_source}")
 
     def _gate_outcome_analytics(self, runner: HypothesisRunner) -> dict[str, int]:

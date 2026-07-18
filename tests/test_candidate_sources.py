@@ -36,7 +36,7 @@ def test_production_like_raw_metadata_contract():
     metadata = PRODUCTION_LIKE_RAW_METADATA
 
     assert metadata.candidate_source == "production_like_raw"
-    assert metadata.candidate_source_version == "v1"
+    assert metadata.candidate_source_version == "v2"
     assert metadata.is_placeholder is False
     assert metadata.edge_conclusions_allowed is False
     assert metadata.direction_support == DirectionSupport.LONG_ONLY.value

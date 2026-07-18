@@ -64,3 +64,37 @@ def test_closed_trade_includes_shadow_gate_enrichment():
     assert closed[0].production_would_allow is False
     assert closed[0].production_block_reasons == ["rsi_below_35"]
     assert closed[0].shadow_gate_block_reasons == ["rsi_below_35"]
+
+
+def test_production_parity_fields_flow_to_position_and_closed_trade():
+    portfolio = PaperPortfolio("baseline_rr15")
+    broker = PaperBroker(portfolio, fee_rate=0, slippage_pct=0)
+    signal = _signal()
+    signal.production_signal_id = "BTCUSDT:15m:1700000000000:LONG"
+    signal.score = 88
+    signal.pattern = "Bullish Engulfing"
+    signal.supertrend_dir = "UP"
+    signal.macd = True
+    signal.volume = True
+    signal.atr = 1.0
+    signal.sl_pct = 0.015
+    signal.risk_distance = 1.5
+    signal.reward_distance = 2.25
+    signal.actual_rr = 1.5
+    signal.market_mode_pre = "NO_TRADE:flat_no_impulse_no_extreme"
+    signal.market_mode_post = signal.market_mode_pre
+
+    broker.open_position(signal)
+    position = portfolio.open_positions[0]
+    trade = broker.close_position(position, reason="TP", exit_price=position.tp)
+
+    assert position.entry_price == signal.entry
+    assert position.sl == signal.sl
+    assert position.tp == signal.tp
+    assert position.rr_ratio == signal.rr_ratio
+    assert trade.production_signal_id == signal.production_signal_id
+    assert trade.score == 88
+    assert trade.risk_distance == 1.5
+    assert trade.reward_distance == 2.25
+    assert trade.actual_rr == 1.5
+    assert trade.market_mode_pre == signal.market_mode_pre

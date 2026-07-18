@@ -64,7 +64,7 @@ SIMPLIFIED_PLACEHOLDER_METADATA = CandidateSourceMetadata(
 
 PRODUCTION_LIKE_RAW_METADATA = CandidateSourceMetadata(
     candidate_source=CandidateSourceType.PRODUCTION_LIKE_RAW.value,
-    candidate_source_version="v1",
+    candidate_source_version="v2",
     is_placeholder=False,
     edge_conclusions_allowed=False,
     direction_support=DirectionSupport.LONG_ONLY.value,
