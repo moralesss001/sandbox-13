@@ -15,6 +15,7 @@ from src.run_all import (
     write_run_all_status,
 )
 from src.runtime_status import RuntimeStatusStore
+from src.research_session_manager import ResearchSessionManager
 from src.universe import CONTRACT_UNIVERSE
 
 
@@ -69,7 +70,7 @@ def test_run_all_status_metadata_is_single_service_and_safe(tmp_path):
     assert status["mode"] == "sandbox_run_all"
     assert status["runtime_layout"] == "single_service"
     assert status["telegram_enabled"] is True
-    assert status["live_engine_enabled"] is True
+    assert status["live_engine_enabled"] is False
     assert status["candidate_source"] == "production_like_raw"
     assert status["timeframe"] == "15m"
     assert status["direction"] == "LONG_ONLY"
@@ -108,14 +109,36 @@ def test_run_all_dry_run_does_not_start_components(tmp_path, capsys):
 
 def test_run_all_starts_telegram_and_live_engine_components(tmp_path):
     calls = {"telegram": 0, "engine_init": 0, "engine_run": 0}
+    store = RuntimeStatusStore(tmp_path / "runtime/global_runtime_status.json")
+    manager = ResearchSessionManager(tmp_path, global_status_path=store.path)
+    manager.ensure_initialized()
+    session_id, session_paths = manager.create_session(
+        {
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "candidate_source": "production_like_raw",
+            "candidate_source_version": "v2",
+            "configured_symbols": list(CONTRACT_UNIVERSE),
+        }
+    )
+    manager.mark_start_requested(session_id)
+    config = RunAllConfig(
+        symbols=list(CONTRACT_UNIVERSE),
+        timeframe="15m",
+        candidate_source="production_like_raw",
+        interval_sec=1,
+        data_root=str(tmp_path),
+    )
 
     def telegram_runner(**kwargs):
         calls["telegram"] += 1
-        assert kwargs["data_root"] == "data"
+        assert kwargs["data_root"] == str(tmp_path)
 
     class Engine:
         def __init__(self, **_kwargs):
             calls["engine_init"] += 1
+            assert _kwargs["session_id"] == session_id
+            assert _kwargs["data_root"] == session_paths.root
 
         def run(self, **kwargs):
             calls["engine_run"] += 1
@@ -126,9 +149,10 @@ def test_run_all_starts_telegram_and_live_engine_components(tmp_path):
 
     result = run_all(
         dry_run=False,
+        config=config,
         telegram_runner=telegram_runner,
         engine_factory=Engine,
-        status_store=RuntimeStatusStore(tmp_path / "runtime/runtime_status.json"),
+        status_store=store,
         supervisor_runtime_sec=0.05,
     )
 
@@ -136,6 +160,13 @@ def test_run_all_starts_telegram_and_live_engine_components(tmp_path):
     assert calls["telegram"] >= 1
     assert calls["engine_init"] >= 1
     assert calls["engine_run"] >= 1
+    manifest = __import__("json").loads(session_paths.manifest.read_text(encoding="utf-8"))
+    assert manifest["status"] == "stopped"
+    assert manifest["stop_reason"] == "engine_error:RuntimeError"
+    assert manifest["latest_report_path"]
+    assert Path(manifest["latest_report_path"]).exists()
+    session_status = manager.session_status_store(session_id).read()
+    assert session_status["errors"]
 
 
 def test_run_all_uses_same_custom_data_root_for_telegram_engine_and_status(tmp_path):
@@ -148,6 +179,18 @@ def test_run_all_uses_same_custom_data_root_for_telegram_engine_and_status(tmp_p
         data_root=str(tmp_path),
     )
     store = RuntimeStatusStore(tmp_path / "runtime/runtime_status.json")
+    manager = ResearchSessionManager(tmp_path, global_status_path=store.path)
+    manager.ensure_initialized()
+    session_id, session_paths = manager.create_session(
+        {
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "candidate_source": "production_like_raw",
+            "candidate_source_version": "v2",
+            "configured_symbols": ["BTCUSDT"],
+        }
+    )
+    manager.mark_start_requested(session_id)
 
     def telegram_runner(**kwargs):
         calls["telegram_roots"].append(kwargs["data_root"])
@@ -169,8 +212,54 @@ def test_run_all_uses_same_custom_data_root_for_telegram_engine_and_status(tmp_p
 
     assert result == 0
     assert set(calls["telegram_roots"]) == {str(tmp_path)}
-    assert calls["engine_roots"] == [str(tmp_path)]
+    assert calls["engine_roots"] == [session_paths.root]
     assert Path(store.read()["runtime_data_directory"]) == tmp_path.resolve()
+
+
+def test_run_all_finalizes_session_when_open_positions_storage_is_corrupt(tmp_path):
+    store = RuntimeStatusStore(tmp_path / "runtime/global_runtime_status.json")
+    manager = ResearchSessionManager(tmp_path, global_status_path=store.path)
+    manager.ensure_initialized()
+    session_id, session_paths = manager.create_session(
+        {
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "candidate_source": "production_like_raw",
+            "candidate_source_version": "v2",
+            "configured_symbols": ["BTCUSDT"],
+        }
+    )
+    manager.mark_start_requested(session_id)
+    session_paths.open_positions.parent.mkdir(parents=True, exist_ok=True)
+    session_paths.open_positions.write_text("{broken", encoding="utf-8")
+
+    class Engine:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            raise RuntimeError("engine failure")
+
+    result = run_all(
+        config=RunAllConfig(
+            symbols=["BTCUSDT"],
+            timeframe="15m",
+            candidate_source="production_like_raw",
+            interval_sec=1,
+            data_root=str(tmp_path),
+        ),
+        telegram_runner=lambda **_kwargs: None,
+        engine_factory=Engine,
+        status_store=store,
+        supervisor_runtime_sec=0.05,
+    )
+
+    manifest = __import__("json").loads(session_paths.manifest.read_text(encoding="utf-8"))
+    session_status = manager.session_status_store(session_id).read()
+    assert result == 0
+    assert manifest["status"] == "stopped"
+    assert manifest["stop_reason"] == "engine_error:RuntimeError"
+    assert any("open_positions_finalize: RuntimeError" in str(item) for item in session_status["errors"])
 
 
 def test_run_all_shutdown_handler_updates_status(tmp_path):
@@ -185,6 +274,47 @@ def test_run_all_shutdown_handler_updates_status(tmp_path):
     assert stop_event.is_set()
     assert status["control_state"] == "shutdown_requested"
     assert status["live_engine_enabled"] is False
+
+
+def test_run_all_recovers_orphaned_preparing_session_without_starting_engine(tmp_path):
+    store = RuntimeStatusStore(tmp_path / "runtime/global_runtime_status.json")
+    manager = ResearchSessionManager(tmp_path, global_status_path=store.path)
+    manager.ensure_initialized()
+    session_id, paths = manager.create_session(
+        {
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "candidate_source": "production_like_raw",
+            "candidate_source_version": "v2",
+            "configured_symbols": ["BTCUSDT"],
+        }
+    )
+    calls = {"engine": 0}
+
+    class Engine:
+        def __init__(self, **_kwargs):
+            calls["engine"] += 1
+
+    result = run_all(
+        dry_run=False,
+        config=RunAllConfig(
+            symbols=["BTCUSDT"],
+            timeframe="15m",
+            candidate_source="production_like_raw",
+            interval_sec=1,
+            data_root=str(tmp_path),
+        ),
+        engine_factory=Engine,
+        status_store=store,
+        supervisor_runtime_sec=0,
+    )
+
+    manifest = __import__("json").loads(paths.manifest.read_text(encoding="utf-8"))
+    assert result == 0
+    assert calls["engine"] == 0
+    assert manifest["status"] == "stopped"
+    assert manifest["stop_reason"] == "startup_recovered_incomplete_start"
+    assert manager.global_status_store.read()["active_session_id"] is None
 
 
 def test_cli_help_includes_run_all():

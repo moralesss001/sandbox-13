@@ -35,6 +35,7 @@ class HypothesisRunner:
         intrabar_policy: str = "conservative",
         data_root: str | Path = "data",
         known_closed_signal_ids: set[str] | None = None,
+        session_id: str | None = None,
     ):
         self.registry = registry or HypothesisRegistry()
         self.portfolios = {
@@ -53,8 +54,9 @@ class HypothesisRunner:
             )
             for hypothesis_id, portfolio in self.portfolios.items()
         }
-        self.events: list[dict[str, Any]] = []
         self.data_root = Path(data_root)
+        self.session_id = session_id
+        self.events: list[dict[str, Any]] = self._load_session_events() if session_id else []
 
     def process_signal(self, signal: SignalCandidate, close_from_history: bool = False) -> None:
         candidate_id = ensure_candidate_id(signal)
@@ -62,6 +64,7 @@ class HypothesisRunner:
             decision = hypothesis.decide(signal)
             event = {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "session_id": signal.session_id or self.session_id,
                 "hypothesis_id": hypothesis.hypothesis_id,
                 "candidate_id": candidate_id,
                 "signal_id": hypothesis_signal_id(candidate_id, hypothesis.hypothesis_id),
@@ -129,6 +132,8 @@ class HypothesisRunner:
         metrics: dict[str, dict[str, Any]] = {}
         for hypothesis_id, portfolio in self.portfolios.items():
             item = portfolio.metrics(baseline_net_R=baseline_net)
+            if self.session_id:
+                item["session_id"] = self.session_id
             item["trades_blocked"] = sum(
                 1
                 for event in self.events
@@ -140,13 +145,23 @@ class HypothesisRunner:
         return metrics
 
     def save_artifacts(self) -> dict[str, str]:
-        date = datetime.now().strftime("%Y%m%d")
-        paths = {
-            "paper_trades": str(self.data_root / "paper_trades" / f"paper_trades_{date}.csv"),
-            "paper_portfolios": str(self.data_root / "paper_portfolios" / f"portfolio_snapshots_{date}.csv"),
-            "hypothesis_events": str(self.data_root / "hypothesis_events" / f"hypothesis_events_{date}.csv"),
-        }
-        self._write_rows(paths["hypothesis_events"], self.events)
+        if self.session_id:
+            paths = {
+                "paper_trades": str(self.data_root / "reports" / "paper_trades_snapshot.csv"),
+                "paper_portfolios": str(self.data_root / "reports" / "portfolio_snapshot.csv"),
+                "hypothesis_events": str(self.data_root / "events" / "hypothesis_events.csv"),
+            }
+        else:
+            date = datetime.now().strftime("%Y%m%d")
+            paths = {
+                "paper_trades": str(self.data_root / "paper_trades" / f"paper_trades_{date}.csv"),
+                "paper_portfolios": str(self.data_root / "paper_portfolios" / f"portfolio_snapshots_{date}.csv"),
+                "hypothesis_events": str(self.data_root / "hypothesis_events" / f"hypothesis_events_{date}.csv"),
+            }
+        if self.session_id:
+            self._write_session_events(paths["hypothesis_events"], self.events)
+        else:
+            self._write_rows(paths["hypothesis_events"], self.events)
 
         trade_rows = []
         for portfolio in self.portfolios.values():
@@ -196,3 +211,37 @@ class HypothesisRunner:
         if isinstance(row.get("shadow_gates"), list):
             row["shadow_gates"] = json.dumps(row["shadow_gates"], ensure_ascii=False, sort_keys=True)
         return row
+
+    def _write_session_events(self, path: str, rows: list[dict[str, Any]]) -> None:
+        target = Path(path)
+        existing: list[dict[str, Any]] = []
+        if target.exists() and target.stat().st_size:
+            with target.open("r", encoding="utf-8", newline="") as handle:
+                existing = list(csv.DictReader(handle))
+        identities = {
+            (str(row.get("candidate_id") or ""), str(row.get("hypothesis_id") or ""))
+            for row in existing
+        }
+        additions = []
+        for row in rows:
+            identity = (
+                str(row.get("candidate_id") or ""),
+                str(row.get("hypothesis_id") or ""),
+            )
+            if identity in identities:
+                continue
+            identities.add(identity)
+            additions.append(row)
+        self._write_rows(path, [*existing, *additions])
+
+    def _load_session_events(self) -> list[dict[str, Any]]:
+        target = self.data_root / "events" / "hypothesis_events.csv"
+        if not target.exists() or not target.stat().st_size:
+            return []
+        with target.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        return [
+            row
+            for row in rows
+            if not row.get("session_id") or row.get("session_id") == self.session_id
+        ]

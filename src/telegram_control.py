@@ -8,6 +8,7 @@ import pandas as pd
 from .candidate_sources import PRODUCTION_LIKE_RAW_METADATA
 from .command_queue import CommandQueue
 from .hypothesis_registry import HypothesisRegistry
+from .research_session_manager import ResearchSessionManager
 from .runtime_status import RuntimeStatusStore
 from .telegram_buttons import (
     diagnostics_keyboard,
@@ -28,15 +29,29 @@ class TelegramControlPanel:
         data_root: str | Path = "data",
     ):
         self.data_root = Path(data_root).expanduser().resolve()
-        self.status_store = status_store or RuntimeStatusStore(self.data_root / "runtime/runtime_status.json")
+        self.session_manager = ResearchSessionManager(
+            self.data_root,
+            global_status_path=status_store.path if status_store is not None else None,
+        )
+        self.status_store = status_store or self.session_manager.global_status_store
+        self.session_manager.ensure_initialized()
         self.command_queue = command_queue or CommandQueue(self.data_root / "runtime/commands.jsonl")
         self.registry = HypothesisRegistry()
-        self.live_reporter = TelegramLivePaperReporter(self.status_store, self.data_root)
-        self.data_exporter = TelegramDataExporter(self.data_root, self.status_store)
+        self.live_reporter = TelegramLivePaperReporter(
+            self.status_store,
+            self.data_root,
+            session_manager=self.session_manager,
+        )
+        self.data_exporter = TelegramDataExporter(
+            self.data_root,
+            self.status_store,
+            session_manager=self.session_manager,
+        )
 
     def status(self) -> str:
         status = self.status_store.read()
         control_state = str(status.get("control_state") or "stopped")
+        session_status = self._selected_session_status(status)
         configured = status.get("configured_symbols") or status.get("symbols") or []
         active = status.get("active_symbols") or []
         unavailable = status.get("unavailable_symbols") or []
@@ -50,11 +65,22 @@ class TelegramControlPanel:
         return "\n".join(
             [
                 state_title,
-                f"runtime: {self._runtime_duration(status) if control_state != 'stopped' else 'stopped'}",
-                f"raw candidates (current run): {status.get('raw_candidates_current_run', 0)}",
-                f"open positions (current): {status.get('open_positions_current', status.get('open_positions_count', 0))}",
-                f"closed trades (lifetime): {status.get('closed_trades_lifetime', status.get('closed_trades_count', 0))}",
-                f"errors: {len(status.get('errors') or [])}",
+                f"service state: {control_state}",
+                f"active session ID: {status.get('active_session_id') or 'none'}",
+                f"last completed session ID: {status.get('last_session_id') or 'none'}",
+                f"session status: {session_status.get('status', 'none')}",
+                f"session started_at: {session_status.get('started_at') or 'none'}",
+                f"session runtime: {self._runtime_duration(session_status) if session_status else 'stopped'}",
+                f"session raw candidates: {session_status.get('raw_candidates_count', 0)}",
+                f"session open positions: {session_status.get('open_positions_count', 0)}",
+                f"session closed trades: {session_status.get('closed_trades_count', 0)}",
+                f"raw candidates (current run): {session_status.get('raw_candidates_count', 0)}",
+                f"lifetime raw candidates: {status.get('lifetime_raw_candidates', status.get('raw_candidates_lifetime', 0))}",
+                f"lifetime closed trades: {status.get('lifetime_closed_trades', status.get('closed_trades_lifetime', 0))}",
+                f"closed trades (lifetime): {status.get('lifetime_closed_trades', status.get('closed_trades_lifetime', 0))}",
+                f"unresolved positions previous session: {status.get('unresolved_open_positions_count', 0)}",
+                f"session errors: {len(session_status.get('errors') or [])}",
+                f"lifetime errors: {len(status.get('lifetime_errors') or status.get('errors') or [])}",
                 f"source: {status.get('candidate_source') or 'N/A'} {status.get('candidate_source_version') or 'N/A'}",
                 f"market: {status.get('timeframe') or 'N/A'} / {status.get('direction') or status.get('live_direction_policy') or 'N/A'}",
                 f"universe: {len(configured)} configured / {len(active)} active / {len(unavailable)} unavailable",
@@ -64,10 +90,11 @@ class TelegramControlPanel:
 
     def settings(self) -> str:
         status = self.status_store.read()
+        session_status = self._selected_session_status(status)
         configured = status.get("configured_symbols") or status.get("symbols") or []
         active = status.get("active_symbols") or []
         unavailable = status.get("unavailable_symbols") or []
-        gate_counts = status.get("shadow_gate_block_counts") or {}
+        gate_counts = session_status.get("shadow_gate_block_counts") or {}
         enabled_gates = len(gate_counts) if status.get("shadow_gates_enabled") and isinstance(gate_counts, dict) else 0
         return "\n".join(
             [
@@ -89,13 +116,14 @@ class TelegramControlPanel:
 
     def diagnostics(self) -> str:
         status = self.status_store.read()
+        session_status = self._selected_session_status(status)
         configured = status.get("configured_symbols") or status.get("symbols") or []
         active = status.get("active_symbols") or []
         unavailable = status.get("unavailable_symbols") or []
-        diagnostics = self.data_exporter.storage.diagnostics()
-        errors = status.get("errors") or []
+        diagnostics = self.live_reporter.storage.diagnostics()
+        errors = session_status.get("errors") or status.get("errors") or []
         last_error = self._last_error_class(errors)
-        reasons = status.get("last_shadow_block_reasons") or []
+        reasons = session_status.get("last_shadow_block_reasons") or status.get("last_shadow_block_reasons") or []
         last_reason = str(reasons[-1]) if isinstance(reasons, list) and reasons else "N/A"
         reason_count = len(reasons) if isinstance(reasons, list) else int(bool(reasons))
         return "\n".join(
@@ -104,6 +132,9 @@ class TelegramControlPanel:
                 f"mode: {status.get('mode') or 'N/A'}",
                 f"runtime layout: {status.get('runtime_layout') or 'N/A'}",
                 f"control state: {status.get('control_state') or 'stopped'}",
+                f"active session ID: {status.get('active_session_id') or 'none'}",
+                f"last session ID: {status.get('last_session_id') or 'none'}",
+                f"session state: {session_status.get('status', 'none')}",
                 f"engine state: {status.get('engine_state') or status.get('control_state') or 'stopped'}",
                 f"runtime data: {diagnostics['runtime_data_directory']}",
                 f"runtime status: {diagnostics['runtime_status_path']}",
@@ -113,11 +144,13 @@ class TelegramControlPanel:
                 f"configured universe count: {len(configured)}",
                 f"active runtime universe count: {len(active)}",
                 f"unavailable symbols: {', '.join(unavailable) or 'none'}",
-                f"last candle: {status.get('last_processed_candle_time') or 'N/A'}",
+                f"last candle: {session_status.get('last_processed_candle_time') or 'N/A'}",
                 f"last error class: {last_error}",
-                f"production allow count: {status.get('production_would_allow_count', 0)}",
-                f"production block count: {status.get('production_would_block_count', 0)}",
-                f"shadow blocked but tracked: {status.get('shadow_blocked_but_tracked_count', 0)}",
+                f"session production allow count: {session_status.get('production_would_allow_count', 0)}",
+                f"session production block count: {session_status.get('production_would_block_count', 0)}",
+                f"session shadow blocked but tracked: {session_status.get('shadow_blocked_but_tracked_count', 0)}",
+                f"lifetime raw candidates: {status.get('lifetime_raw_candidates', 0)}",
+                f"lifetime closed trades: {status.get('lifetime_closed_trades', 0)}",
                 f"last shadow reason: {last_reason}",
                 f"last shadow reason count: {reason_count}",
                 "execution: PAPER ONLY",
@@ -170,7 +203,7 @@ class TelegramControlPanel:
                     "Start Live Paper Research?",
                     "",
                     "Source:",
-                    "production_like_raw v1",
+                    f"production_like_raw {PRODUCTION_LIKE_RAW_METADATA.candidate_source_version}",
                     "",
                     "Mode:",
                     "15m LONG_ONLY",
@@ -202,8 +235,10 @@ class TelegramControlPanel:
     def live_start(self, requested_by: str) -> str:
         status = self.status_store.read()
         control_state = str(status.get("control_state") or "stopped")
-        if control_state in {"running", "start_requested"}:
-            return "Research is already running."
+        if control_state != "stopped":
+            if control_state in {"running", "start_requested"}:
+                return "Research is already running."
+            return f"Research Start rejected: service state is {control_state}. Wait for stopped."
 
         symbols = self._default_live_symbols(status)
         payload = {
@@ -214,7 +249,20 @@ class TelegramControlPanel:
             "symbols": symbols,
             "mode": "live_paper",
         }
-        command = self.command_queue.enqueue("START_LIVE_PAPER", requested_by=requested_by, payload=payload)
+        snapshot = self._build_config_snapshot(status, symbols)
+        session_id, _paths = self.session_manager.create_session(snapshot)
+        payload["session_id"] = session_id
+        try:
+            command = self.command_queue.enqueue("START_LIVE_PAPER", requested_by=requested_by, payload=payload)
+            self.session_manager.mark_start_requested(session_id)
+        except Exception:
+            self.session_manager.finalize_session(
+                session_id,
+                stop_reason="start_queue_failed",
+                unresolved_open_positions_count=0,
+                latest_report_path=None,
+            )
+            raise
         safety_status = {
             **(status.get("safety_status") or {}),
             "api_mode": "paper",
@@ -228,7 +276,6 @@ class TelegramControlPanel:
         direction = "LONG_ONLY" if status.get("runtime_layout") == "single_service" else "LONG"
         self.status_store.update(
             **mode_updates,
-            control_state="start_requested",
             symbols=symbols,
             timeframe="15m",
             direction=direction,
@@ -237,10 +284,14 @@ class TelegramControlPanel:
             **PRODUCTION_LIKE_RAW_METADATA.as_status_fields(),
             shadow_gates_enabled=True,
             safety_status=safety_status,
+            active_session_id=session_id,
+            session_id=session_id,
+            session_status="start_requested",
         )
         return "\n".join(
             [
                 f"Queued safe command: {command.command} ({command.command_id})",
+                f"session_id: {session_id}",
                 "Live paper start requested for sandbox engine.",
                 f"symbols: {', '.join(symbols)}",
                 "candidate_source: production_like_raw",
@@ -261,9 +312,14 @@ class TelegramControlPanel:
         return self.stop_live_research(requested_by)
 
     def stop_live_research(self, requested_by: str) -> str:
-        command = self.command_queue.enqueue("STOP_LIVE_RESEARCH", requested_by=requested_by)
-        report_path = self._write_stop_report(command.command_id)
         status = self.status_store.read()
+        session_id = status.get("active_session_id")
+        command = self.command_queue.enqueue(
+            "STOP_LIVE_RESEARCH",
+            requested_by=requested_by,
+            payload={"session_id": session_id} if session_id else {},
+        )
+        report_path = self._write_stop_report(command.command_id)
         mode_updates = {} if status.get("runtime_layout") == "single_service" else {"mode": "paper"}
         self.status_store.update(
             **mode_updates,
@@ -271,6 +327,11 @@ class TelegramControlPanel:
             stop_requested_at=datetime.now().isoformat(timespec="seconds"),
             latest_report_path=str(report_path),
         )
+        if session_id:
+            self.session_manager.session_status_store(str(session_id)).update(
+                status="stop_requested",
+                latest_report_path=str(report_path),
+            )
         return "\n".join(
             [
                 "Research stop requested.",
@@ -281,18 +342,33 @@ class TelegramControlPanel:
         )
 
     def restart_live_research(self, requested_by: str) -> str:
-        command = self.command_queue.enqueue("RESTART_LIVE_RESEARCH", requested_by=requested_by)
         status = self.status_store.read()
+        control_state = str(status.get("control_state") or "stopped")
+        if control_state not in {"running", "start_requested"}:
+            return "Research is not running."
+        session_id = status.get("active_session_id")
+        command = self.command_queue.enqueue(
+            "RESTART_LIVE_RESEARCH",
+            requested_by=requested_by,
+            payload={"session_id": session_id} if session_id else {},
+        )
         mode_updates = {} if status.get("runtime_layout") == "single_service" else {"mode": "paper"}
-        self.status_store.update(**mode_updates, control_state="restart_requested")
-        return f"Queued safe command: {command.command} ({command.command_id})"
+        self.status_store.update(**mode_updates, control_state="stop_requested")
+        if session_id:
+            self.session_manager.session_status_store(str(session_id)).update(status="stop_requested")
+        return (
+            f"Queued safe command: {command.command} ({command.command_id})\n"
+            "Current session will stop safely. Start a new independent session after state becomes stopped."
+        )
 
-    def export_data(self) -> ExportDataResult:
-        return self.data_exporter.build()
+    def export_data(self, session_id: str | None = None) -> ExportDataResult:
+        return self.data_exporter.build(session_id=session_id)
 
     def latest_report(self) -> str:
-        status_path = self.status_store.read().get("latest_report_path")
-        latest = Path(status_path) if status_path else self._latest_file(self.data_root / "demo_reports", "demo_report_*.md")
+        status = self.status_store.read()
+        session_status = self._selected_session_status(status)
+        status_path = session_status.get("latest_report_path") if session_status else None
+        latest = Path(status_path) if status_path else None
         if not latest or not latest.exists():
             return "No demo report found."
         text = latest.read_text(encoding="utf-8").splitlines()
@@ -305,7 +381,14 @@ class TelegramControlPanel:
         return "\n".join(lines[:20]) if lines else "No candidate suggestions found in latest report."
 
     def portfolio(self) -> str:
-        latest = self._latest_file(self.data_root / "paper_portfolios", "portfolio_snapshots_*.csv")
+        session_id = self.session_manager.selected_session_id()
+        latest = (
+            self.session_manager.paths(session_id).reports / "portfolio_snapshot.csv"
+            if session_id
+            else None
+        )
+        if latest is not None and not latest.exists():
+            latest = None
         if not latest:
             return "No paper portfolio snapshot found."
         df = pd.read_csv(latest)
@@ -313,7 +396,14 @@ class TelegramControlPanel:
         return f"Portfolio snapshot: {latest}\n" + df[columns].head(15).to_markdown(index=False)
 
     def events(self) -> str:
-        latest = self._latest_file(self.data_root / "hypothesis_events", "hypothesis_events_*.csv")
+        session_id = self.session_manager.selected_session_id()
+        latest = (
+            self.session_manager.paths(session_id).events / "hypothesis_events.csv"
+            if session_id
+            else None
+        )
+        if latest is not None and not latest.exists():
+            latest = None
         if not latest:
             return "No hypothesis events found."
         df = pd.read_csv(latest)
@@ -381,13 +471,20 @@ class TelegramControlPanel:
         return configured_universe()
 
     def _write_stop_report(self, command_id: str) -> Path:
-        reports_dir = self.data_root / "demo_reports"
+        status = self.status_store.read()
+        session_id = status.get("active_session_id")
+        reports_dir = (
+            self.session_manager.paths(str(session_id)).reports
+            if session_id
+            else self.data_root / "demo_reports"
+        )
         reports_dir.mkdir(parents=True, exist_ok=True)
         path = reports_dir / f"stop_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
         status = self.status_store.read()
-        latest_portfolio = self._latest_file(self.data_root / "paper_portfolios", "portfolio_snapshots_*.csv")
-        latest_events = self._latest_file(self.data_root / "hypothesis_events", "hypothesis_events_*.csv")
-        latest_trades = self._latest_file(self.data_root / "paper_trades", "paper_trades_*.csv")
+        session_paths = self.session_manager.paths(str(session_id)) if session_id else None
+        latest_portfolio = session_paths.reports / "portfolio_snapshot.csv" if session_paths else None
+        latest_events = session_paths.events / "hypothesis_events.csv" if session_paths else None
+        latest_trades = session_paths.closed_trades if session_paths else None
         lines = [
             "# Crypto13Research Stop Report",
             "",
@@ -417,6 +514,50 @@ class TelegramControlPanel:
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
+
+    def _selected_session_status(self, global_status: dict) -> dict:
+        session_id = global_status.get("active_session_id") or global_status.get("last_session_id")
+        if not session_id:
+            return {}
+        path = self.session_manager.paths(str(session_id)).runtime_status
+        return RuntimeStatusStore(path).read() if path.exists() else {}
+
+    def _build_config_snapshot(self, status: dict, symbols: list[str]) -> dict:
+        hypotheses = [
+            {
+                "hypothesis_id": item.hypothesis_id,
+                "name": item.name,
+                "enabled": item.enabled,
+                "priority": item.priority,
+                "rules": list(item.rules),
+            }
+            for item in self.registry.enabled()
+        ]
+        return {
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "candidate_source": PRODUCTION_LIKE_RAW_METADATA.candidate_source,
+            "candidate_source_version": PRODUCTION_LIKE_RAW_METADATA.candidate_source_version,
+            "configured_symbols": list(symbols),
+            "hypotheses": hypotheses,
+            "hard_shadow_gates": {
+                "rsi": {"minimum": 35.0, "maximum": 65.0},
+                "sl_pct": {"minimum": 0.0075, "maximum": 0.035},
+                "pattern_against_long": True,
+                "market_mode_15m": "analytics_only",
+            },
+            "rr_tp_sl": {"rr_ratio": 1.5, "sl_atr_multiplier": 1.5},
+            "paper_trading": {
+                "starting_balance_usdt": 1000.0,
+                "default_position_size_usdt": 100.0,
+                "leverage": 10.0,
+                "fee_rate": 0.0004,
+                "slippage_pct": 0.0005,
+                "intrabar_policy": "conservative",
+            },
+            "safety": dict(status.get("safety_status") or {}),
+            "code_revision": status.get("code_revision"),
+        }
 
     def _runtime_duration(self, status: dict) -> str:
         started_at = status.get("started_at")

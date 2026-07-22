@@ -106,7 +106,8 @@ class TelegramHandlers:
         if command == "/events":
             return TelegramResponse(self.control.events(), self.control.main_keyboard())
         if command == "/export_data":
-            result = self.control.export_data()
+            parts = text.split(maxsplit=1)
+            result = self.control.export_data(parts[1].strip() if len(parts) == 2 else None)
             return TelegramResponse(result.message, self.control.main_keyboard(), result.documents)
         if command == "/help":
             return TelegramResponse(self.control.help(), self.control.main_keyboard())

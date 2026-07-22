@@ -55,6 +55,7 @@ class PaperBroker:
             rr_ratio=float(signal.rr_ratio or 1.5),
             position_size_usdt=size,
             leverage=self.leverage,
+            session_id=signal.session_id,
             candidate_id=candidate_id,
             signal_id=signal_id,
             reason=signal.reason,

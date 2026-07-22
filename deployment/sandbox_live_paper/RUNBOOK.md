@@ -31,11 +31,18 @@ Separate `telegram-bot` and `live-research` commands remain available only as lo
 
 ## Runtime Paths
 
-- Runtime status: `data/runtime/runtime_status.json`
+- Global service/lifetime status: `data/runtime/global_runtime_status.json`
 - Command queue: `data/runtime/commands.jsonl`
-- Open virtual positions: `data/paper_trades/open_positions.json`
-- Closed paper trades: `data/paper_trades/closed_trades.csv`
-- Reports: `reports/`
+- Session index: `data/sessions/index.json`
+- Session manifest: `data/sessions/<session_id>/manifest.json`
+- Immutable config snapshot: `data/sessions/<session_id>/config_snapshot.json`
+- Session runtime status: `data/sessions/<session_id>/runtime_status.json`
+- Open virtual positions: `data/sessions/<session_id>/paper_trades/open_positions.json`
+- Closed paper trades: `data/sessions/<session_id>/paper_trades/closed_trades.csv`
+- Session events: `data/sessions/<session_id>/events/`
+- Session reports: `data/sessions/<session_id>/reports/`
+
+Legacy root runtime and paper files are reference-only `legacy_session_unscoped` data. Do not move, rewrite, or use them as the active session.
 
 ## CLI Fallback Commands
 
@@ -77,5 +84,8 @@ Telegram fallback:
 
 - `run-all` is the primary Railway runtime.
 - `run-all` writes `mode=sandbox_run_all` and `runtime_layout=single_service` to runtime status.
-- `Stop Live Research` stops the live engine safely, flushes paper artifacts, and leaves Telegram available for status and restart.
+- Every confirmed Start after `stopped` creates a new isolated `session_id`.
+- The first observed closed candle is the new session checkpoint baseline; the first later closed candle is processed.
+- `Stop Live Research` finishes the active iteration, marks remaining positions unresolved, flushes session artifacts, and leaves Telegram available.
+- Use `/export_data <session_id>` to export one selected session. Without an ID, Export uses active then last completed.
 - Do not touch production Crypto13 processes.

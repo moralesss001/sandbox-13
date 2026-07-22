@@ -13,6 +13,7 @@ from src.runtime_status import RuntimeStatusStore
 from src.telegram_config import TelegramConfig
 from src.telegram_control import TelegramControlPanel
 from src.telegram_handlers import TelegramHandlers
+from src.universe import CONTRACT_UNIVERSE
 
 
 def _signal(close_time: int = 1_700_000_000_000) -> SignalCandidate:
@@ -62,6 +63,20 @@ def _handlers(tmp_path: Path, allowed_chat_id: str = "123") -> TelegramHandlers:
         TelegramConfig(token="token", allowed_user_id="123", allowed_chat_id=allowed_chat_id),
         control,
     )
+
+
+def _create_session(handlers: TelegramHandlers):
+    handlers.control.status_store.update(control_state="stopped", active_session_id=None)
+    session_id, paths = handlers.control.session_manager.create_session(
+        {
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "candidate_source": "production_like_raw",
+            "candidate_source_version": "v2",
+            "configured_symbols": list(CONTRACT_UNIVERSE),
+        }
+    )
+    return session_id, paths
 
 
 def test_storage_paths_are_absolute_consistent_and_parents_exist(tmp_path):
@@ -203,7 +218,8 @@ def test_export_data_rejects_unauthorized_user_and_chat(tmp_path):
 
 def test_export_data_sends_only_allowlisted_files_and_sanitizes_status(tmp_path):
     handlers = _handlers(tmp_path)
-    storage = handlers.control.data_exporter.storage
+    session_id, paths = _create_session(handlers)
+    storage = LivePaperStorage(paths.root)
     storage.open_positions_path.write_text(
         '[{"signal_id":"abc","api_key":"OPEN_SECRET",'
         '"reason":"https://api.telegram.org/bot12345:OPEN_TOKEN/getUpdates"}]',
@@ -214,7 +230,7 @@ def test_export_data_sends_only_allowlisted_files_and_sanitizes_status(tmp_path)
         "abc,win,CLOSED_SECRET,https://api.telegram.org/bot12345:CLOSED_TOKEN/getUpdates\n",
         encoding="utf-8",
     )
-    handlers.control.status_store.update(
+    handlers.control.session_manager.session_status_store(session_id).update(
         errors=[{"error": "request failed at https://api.telegram.org/bot12345:TOP_SECRET/getUpdates"}],
         telegram_token="must_not_export",
         candidate_source="bot12345:SUMMARY_SECRET",
@@ -232,7 +248,14 @@ def test_export_data_sends_only_allowlisted_files_and_sanitizes_status(tmp_path)
         for path in (safe_status_path, safe_open_path, safe_closed_path, safe_summary_path)
     )
 
-    assert names == {"runtime_status.json", "open_positions.json", "closed_trades.csv", "run_summary.json"}
+    assert names == {
+        "manifest.json",
+        "config_snapshot.json",
+        "runtime_status.json",
+        "open_positions.json",
+        "closed_trades.csv",
+        "run_summary.json",
+    }
     assert ".env" not in names
     assert "TOP_SECRET" not in exported
     assert "must_not_export" not in exported
@@ -246,6 +269,9 @@ def test_export_data_sends_only_allowlisted_files_and_sanitizes_status(tmp_path)
 
 def test_export_data_reports_missing_files_without_crash(tmp_path):
     handlers = _handlers(tmp_path)
+    _session_id, paths = _create_session(handlers)
+    paths.open_positions.unlink()
+    paths.closed_trades.unlink()
 
     response = handlers.handle_message("/export_data", user_id="123", chat_id="123")
 
@@ -253,24 +279,40 @@ def test_export_data_reports_missing_files_without_crash(tmp_path):
     assert "- open_positions.json" in response.text
     assert "- closed_trades.csv" in response.text
     assert str(tmp_path.resolve()) not in response.text
-    assert {Path(path).name for path in response.documents} == {"runtime_status.json", "run_summary.json"}
+    assert {Path(path).name for path in response.documents} == {
+        "manifest.json",
+        "config_snapshot.json",
+        "runtime_status.json",
+        "run_summary.json",
+    }
 
 
 def test_run_summary_contains_clarified_counter_semantics(tmp_path):
     handlers = _handlers(tmp_path)
+    session_id, _paths = _create_session(handlers)
+    handlers.control.session_manager.session_status_store(session_id).update(
+        configured_symbols=list(CONTRACT_UNIVERSE),
+        raw_candidates_count=4,
+        open_positions_count=2,
+        closed_trades_count=10,
+    )
+    handlers.control.status_store.update(
+        lifetime_raw_candidates=68,
+        lifetime_closed_trades=10,
+    )
     response = handlers.handle_message("/export_data", user_id="123", chat_id="123")
     summary_path = next(Path(path) for path in response.documents if Path(path).name == "run_summary.json")
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
 
-    assert summary["raw_candidates_current_run"] == 4
-    assert summary["raw_candidates_lifetime"] == 68
-    assert summary["open_positions_current"] == 2
-    assert summary["closed_trades_lifetime"] == 10
+    assert summary["raw_candidates_count"] == 4
+    assert summary["lifetime_raw_candidates"] == 68
+    assert summary["open_positions_count"] == 2
+    assert summary["lifetime_closed_trades"] == 10
     assert summary["configured_symbols_count"] == 46
     assert summary["configured_symbols"][0:2] == ["BTCUSDT", "ETHUSDT"]
     assert summary["active_symbols"] == []
     assert summary["unavailable_symbols"] == []
-    assert Path(summary["runtime_data_directory"]) == tmp_path.resolve()
+    assert Path(summary["session_storage_paths"]["session_root"]).parent.parent == tmp_path.resolve()
 
 
 def test_engine_stop_keeps_cumulative_closed_count_and_single_service_metadata(tmp_path):

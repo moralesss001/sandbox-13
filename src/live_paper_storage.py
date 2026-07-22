@@ -13,11 +13,19 @@ _STORAGE_LOCK = threading.RLock()
 
 
 class LivePaperStorage:
-    def __init__(self, data_root: str | Path = "data"):
+    def __init__(
+        self,
+        data_root: str | Path = "data",
+        runtime_status_path: str | Path | None = None,
+    ):
         self.data_root = Path(data_root).expanduser().resolve()
         self.open_positions_path = self.data_root / "paper_trades" / "open_positions.json"
         self.closed_trades_path = self.data_root / "paper_trades" / "closed_trades.csv"
-        self.runtime_status_path = self.data_root / "runtime" / "runtime_status.json"
+        self.runtime_status_path = (
+            Path(runtime_status_path).expanduser().resolve()
+            if runtime_status_path is not None
+            else self.data_root / "runtime" / "runtime_status.json"
+        )
         self.open_positions_path.parent.mkdir(parents=True, exist_ok=True)
         self.runtime_status_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -72,6 +80,57 @@ class LivePaperStorage:
                 restored += 1
         return restored
 
+    def load_closed_trades(self) -> list[Trade]:
+        with _STORAGE_LOCK:
+            trades = []
+            for row in self._read_closed_rows():
+                payload = self._deserialize_trade_row(row)
+                required = {
+                    "trade_id",
+                    "hypothesis_id",
+                    "symbol",
+                    "timeframe",
+                    "direction",
+                    "entry_time",
+                    "entry_price",
+                    "tp",
+                    "sl",
+                    "rr_ratio",
+                    "position_size_usdt",
+                    "leverage",
+                }
+                if not required.issubset(payload):
+                    continue
+                try:
+                    trades.append(Trade(**payload))
+                except TypeError as exc:
+                    raise RuntimeError(
+                        f"Corrupted closed trades storage: {self.closed_trades_path}"
+                    ) from exc
+            return trades
+
+    def restore_closed_trades(self, portfolios: dict[str, Any]) -> int:
+        restored = 0
+        for trade in self.load_closed_trades():
+            portfolio = portfolios.get(trade.hypothesis_id)
+            if portfolio is not None and portfolio.add_closed_trade(trade):
+                restored += 1
+        return restored
+
+    def mark_open_positions_unresolved(self) -> int:
+        positions = self.load_open_positions()
+        for position in positions:
+            position.session_final_status = "UNRESOLVED_AT_SESSION_END"
+        rows = [dict(position.__dict__) for position in positions]
+        with _STORAGE_LOCK:
+            temp_path = self.open_positions_path.with_suffix(".json.tmp")
+            temp_path.write_text(
+                json.dumps(rows, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            temp_path.replace(self.open_positions_path)
+        return len(positions)
+
     def save_open_positions(self, portfolios: dict[str, Any]) -> str:
         positions = []
         for portfolio in portfolios.values():
@@ -118,6 +177,56 @@ class LivePaperStorage:
         if isinstance(row.get("shadow_gates"), list):
             row["shadow_gates"] = json.dumps(row["shadow_gates"], ensure_ascii=False, sort_keys=True)
         return row
+
+    def _deserialize_trade_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        float_fields = {
+            "entry_price",
+            "tp",
+            "sl",
+            "rr_ratio",
+            "position_size_usdt",
+            "leverage",
+            "rsi",
+            "atr_pct",
+            "atr",
+            "sl_pct",
+            "risk_distance",
+            "reward_distance",
+            "actual_rr",
+            "exit_price",
+            "r",
+            "pnl_usdt",
+            "fees_usdt",
+            "slippage_usdt",
+        }
+        bool_fields = {
+            "macd",
+            "volume",
+            "is_placeholder",
+            "edge_conclusions_allowed",
+            "production_would_allow",
+        }
+        list_fields = {"production_block_reasons", "shadow_gate_block_reasons"}
+        payload: dict[str, Any] = {}
+        for key in Trade.__dataclass_fields__:
+            if key not in row:
+                continue
+            value = row.get(key)
+            if value in {"", None}:
+                continue
+            if key in float_fields:
+                payload[key] = float(value)
+            elif key == "score":
+                payload[key] = int(float(value))
+            elif key in bool_fields:
+                payload[key] = str(value).strip().lower() in {"1", "true", "yes"}
+            elif key in list_fields:
+                payload[key] = [item for item in str(value).split("|") if item]
+            elif key == "shadow_gates":
+                payload[key] = json.loads(value) if isinstance(value, str) else value
+            else:
+                payload[key] = value
+        return payload
 
     def closed_trades_count(self) -> int:
         with _STORAGE_LOCK:

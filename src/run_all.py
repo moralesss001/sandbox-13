@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 from .candidate_sources import PRODUCTION_LIKE_RAW_METADATA
 from .live_paper_storage import LivePaperStorage
 from .live_research_engine import LiveResearchEngine
+from .research_session_manager import ResearchSessionManager
 from .runtime_status import RuntimeStatusStore, utc_now
 from .telegram_bot import run_telegram_bot
 from .universe import CONTRACT_UNIVERSE, CONTRACT_UNIVERSE_NAME, configured_universe
@@ -89,12 +90,14 @@ def build_run_all_plan(config: RunAllConfig | None = None) -> dict[str, Any]:
 def write_run_all_status(
     plan: dict[str, Any],
     status_store: RuntimeStatusStore | None = None,
+    session_manager: ResearchSessionManager | None = None,
 ) -> dict[str, Any]:
-    store = status_store or RuntimeStatusStore(Path("data/runtime/runtime_status.json"))
-    storage = LivePaperStorage(store.path.parent.parent)
-    diagnostics = storage.diagnostics()
-    diagnostics["paths_exist"]["runtime_status"] = True
-    previous = store.read()
+    manager = session_manager or ResearchSessionManager(
+        status_store.path.parent.parent if status_store is not None else "data",
+        global_status_path=status_store.path if status_store is not None else None,
+    )
+    store = status_store or manager.global_status_store
+    previous = manager.ensure_initialized()
     safety_status = {
         **(previous.get("safety_status") or {}),
         "api_mode": "paper",
@@ -104,13 +107,19 @@ def write_run_all_status(
         "real_orders_enabled": False,
         "testnet_orders_enabled": False,
     }
+    prior_control_state = str(previous.get("control_state") or "stopped")
+    if previous.get("active_session_id") and prior_control_state in {
+        "shutdown_requested",
+        "shutdown_complete",
+    }:
+        prior_control_state = "running"
     status = {
         **previous,
         "mode": plan["mode"],
         "runtime_layout": plan["runtime_layout"],
         "telegram_enabled": True,
-        "live_engine_enabled": True,
-        "started_at": previous.get("started_at") or utc_now(),
+        "live_engine_enabled": False,
+        "service_started_at": previous.get("service_started_at") or utc_now(),
         "symbols": plan["symbols"],
         "configured_universe": plan["configured_universe"],
         "configured_symbols": plan["symbols"],
@@ -125,11 +134,13 @@ def write_run_all_status(
         "live_direction_policy": "LONG_ONLY",
         "candidate_mode": plan["candidate_source"],
         **PRODUCTION_LIKE_RAW_METADATA.as_status_fields(),
-        "control_state": "running",
+        "control_state": "stopped" if not previous.get("active_session_id") else prior_control_state,
         "railway_start_command": plan["railway_start_command"],
         "railway_pre_deploy_command": plan["railway_pre_deploy_command"],
-        "storage_paths": storage.paths(),
-        **diagnostics,
+        "global_runtime_status_path": str(store.path),
+        "sessions_root": str(manager.sessions_root),
+        "runtime_data_directory": str(manager.data_root),
+        "runtime_status_path": str(store.path),
         "safety_status": safety_status,
     }
     return store.write(status)
@@ -184,8 +195,26 @@ def run_all(
 ) -> int:
     cfg = config or load_run_all_config()
     plan = build_run_all_plan(cfg)
-    store = status_store or RuntimeStatusStore(Path(cfg.data_root) / "runtime/runtime_status.json")
-    write_run_all_status(plan, store)
+    manager = ResearchSessionManager(
+        cfg.data_root,
+        global_status_path=status_store.path if status_store is not None else None,
+    )
+    store = status_store or manager.global_status_store
+    previous = manager.ensure_initialized()
+    if not dry_run and previous.get("active_session_id") and previous.get("control_state") == "session_preparing":
+        orphan_session_id = str(previous["active_session_id"])
+        report_path = manager.write_failure_report(
+            orphan_session_id,
+            reason="startup_recovered_incomplete_start",
+            unresolved_open_positions_count=0,
+        )
+        manager.finalize_session(
+            orphan_session_id,
+            stop_reason="startup_recovered_incomplete_start",
+            unresolved_open_positions_count=0,
+            latest_report_path=str(report_path),
+        )
+    write_run_all_status(plan, store, manager)
     print(format_run_all_plan(plan))
     if dry_run:
         return 0
@@ -193,25 +222,38 @@ def run_all(
     stop_event = threading.Event()
     install_shutdown_handlers(stop_event, store)
 
+    def record_lifetime_error(error: str) -> None:
+        status = store.read()
+        entry = {"timestamp": utc_now(), "error": error}
+        errors = [*list(status.get("errors") or []), entry][-20:]
+        lifetime_errors = [*list(status.get("lifetime_errors") or []), entry][-1000:]
+        store.update(errors=errors, lifetime_errors=lifetime_errors)
+
     def supervise_telegram() -> None:
         while not stop_event.is_set():
             try:
                 telegram_runner(once=False, data_root=cfg.data_root)
             except Exception as exc:  # noqa: BLE001 - Railway supervisor must log and retry.
-                store.append_error(f"telegram_bot: {type(exc).__name__}")
+                record_lifetime_error(f"telegram_bot: {type(exc).__name__}")
                 stop_event.wait(5)
 
     def supervise_engine() -> None:
         while not stop_event.is_set():
             status = store.read()
-            control_state = str(status.get("control_state") or "running")
-            if control_state in {"stopped", "stop_requested"}:
+            control_state = str(status.get("control_state") or "stopped")
+            session_id = status.get("active_session_id")
+            if control_state not in {"start_requested", "running", "stop_requested", "restart_requested"} or not session_id:
                 store.update(live_engine_enabled=False)
                 stop_event.wait(5)
                 continue
             try:
                 store.update(live_engine_enabled=True)
-                engine = engine_factory(data_root=cfg.data_root, status_store=store)
+                engine = engine_factory(
+                    data_root=manager.paths(str(session_id)).root,
+                    status_store=store,
+                    session_id=str(session_id),
+                    session_manager=manager,
+                )
                 engine.run(
                     symbols=cfg.symbols,
                     timeframe=cfg.timeframe,
@@ -220,8 +262,38 @@ def run_all(
                     candidate_source=cfg.candidate_source,
                 )
             except Exception as exc:  # noqa: BLE001 - keep Telegram available and log engine failures.
-                store.append_error(f"live_research_engine: {exc}")
+                record_lifetime_error(f"live_research_engine: {type(exc).__name__}")
                 store.update(live_engine_enabled=False)
+                if store.read().get("active_session_id") == session_id:
+                    session_paths = manager.paths(str(session_id))
+                    session_storage = LivePaperStorage(
+                        session_paths.root,
+                        runtime_status_path=session_paths.runtime_status,
+                    )
+                    error_text = f"live_research_engine: {type(exc).__name__}"
+                    manager.session_status_store(str(session_id)).append_error(error_text)
+                    unresolved_count = 0
+                    failure_reason = error_text
+                    try:
+                        unresolved_count = session_storage.mark_open_positions_unresolved()
+                    except Exception as storage_exc:  # noqa: BLE001 - finalization must survive corrupt storage.
+                        storage_error = (
+                            "open_positions_finalize: "
+                            f"{type(storage_exc).__name__}"
+                        )
+                        manager.session_status_store(str(session_id)).append_error(storage_error)
+                        failure_reason = f"{error_text}; {storage_error}"
+                    report_path = manager.write_failure_report(
+                        str(session_id),
+                        reason=failure_reason,
+                        unresolved_open_positions_count=unresolved_count,
+                    )
+                    manager.finalize_session(
+                        str(session_id),
+                        stop_reason=f"engine_error:{type(exc).__name__}",
+                        unresolved_open_positions_count=unresolved_count,
+                        latest_report_path=str(report_path),
+                    )
                 stop_event.wait(5)
 
     threads = [
@@ -239,7 +311,13 @@ def run_all(
         time.sleep(1)
     for thread in threads:
         thread.join(timeout=10)
-    store.update(live_engine_enabled=False, telegram_enabled=False, control_state="shutdown_complete")
+    final_status = store.read()
+    store.update(
+        live_engine_enabled=False,
+        telegram_enabled=False,
+        service_state="stopped",
+        control_state=final_status.get("control_state") if final_status.get("active_session_id") else "stopped",
+    )
     return 0
 
 

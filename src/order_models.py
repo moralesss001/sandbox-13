@@ -40,6 +40,7 @@ class SignalCandidate:
     tp: float
     sl: float
     rr_ratio: float = 1.5
+    session_id: str | None = None
     candidate_id: str | None = None
     signal_id: str | None = None
     created_at: str | None = None
@@ -93,6 +94,7 @@ class Order:
     sl: float
     position_size_usdt: float
     leverage: float
+    session_id: str | None = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -110,6 +112,7 @@ class Position:
     rr_ratio: float
     position_size_usdt: float
     leverage: float
+    session_id: str | None = None
     candidate_id: str | None = None
     signal_id: str | None = None
     status: str = TradeStatus.OPEN.value
@@ -144,6 +147,7 @@ class Position:
     production_would_allow: bool = True
     production_block_reasons: list[str] = field(default_factory=list)
     shadow_gate_block_reasons: list[str] = field(default_factory=list)
+    session_final_status: str | None = None
 
 
 @dataclass
@@ -204,8 +208,7 @@ def ensure_candidate_id(signal: SignalCandidate) -> str:
         ),
         signal.created_at or "unknown_time",
     )
-    material = "|".join(
-        [
+    identity_parts = [
             str(signal.candidate_source or "unknown"),
             str(signal.candidate_source_version or "unknown"),
             signal.symbol.upper(),
@@ -213,8 +216,10 @@ def ensure_candidate_id(signal: SignalCandidate) -> str:
             signal.direction.upper(),
             str(candle_time),
             str(signal.setup_type or "UNKNOWN").lower(),
-        ]
-    )
+    ]
+    if signal.session_id:
+        identity_parts.insert(0, str(signal.session_id))
+    material = "|".join(identity_parts)
     signal.candidate_id = f"candidate-{sha256(material.encode('utf-8')).hexdigest()[:24]}"
     signal.signal_id = signal.signal_id or signal.candidate_id
     return signal.candidate_id

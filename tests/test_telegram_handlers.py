@@ -58,6 +58,19 @@ def _handlers(tmp_path):
     return TelegramHandlers(config, control)
 
 
+def _create_session(handlers):
+    session_id, paths = handlers.control.session_manager.create_session(
+        {
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "candidate_source": "production_like_raw",
+            "candidate_source_version": "v2",
+            "configured_symbols": list(CONTRACT_UNIVERSE),
+        }
+    )
+    return session_id, paths
+
+
 def test_unauthorized_user_is_rejected(tmp_path):
     handlers = _handlers(tmp_path)
 
@@ -80,13 +93,16 @@ def test_read_only_status_command_works(tmp_path):
 
 def test_short_status_shows_running_state_and_duration(tmp_path):
     handlers = _handlers(tmp_path)
+    session_id, paths = _create_session(handlers)
+    handlers.control.session_manager.session_status_store(session_id).update(status="running")
     handlers.control.status_store.update(control_state="running")
 
     response = handlers.handle_callback("control:status", user_id="123")
 
     assert "🟢 Research Running" in response.text
     assert "runtime: " in response.text
-    assert "runtime: stopped" not in response.text
+    assert f"active session ID: {session_id}" in response.text
+    assert "session status: running" in response.text
 
 
 def test_telegram_buttons_exist():
@@ -110,7 +126,7 @@ def test_start_live_confirmation_screen(tmp_path):
     response = handlers.handle_message("/start_live", user_id="123")
 
     assert "Start Live Paper Research?" in response.text
-    assert "production_like_raw v1" in response.text
+    assert "production_like_raw v2" in response.text
     assert "PAPER ONLY" in response.text
     assert "Real orders:\nOFF" in response.text
     assert response.reply_markup is not None
@@ -291,7 +307,8 @@ def test_open_trades_handles_empty_positions(tmp_path):
 
 def test_open_trades_shows_position_metadata(tmp_path):
     handlers = _handlers(tmp_path)
-    path = tmp_path / "paper_trades/open_positions.json"
+    _session_id, paths = _create_session(handlers)
+    path = paths.open_positions
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '[{"symbol":"BTCUSDT","direction":"LONG","entry_price":100,"tp":105,"sl":95,'
@@ -318,7 +335,8 @@ def test_closed_trades_handles_empty_file(tmp_path):
 
 def test_closed_trades_shows_latest_closed_trade(tmp_path):
     handlers = _handlers(tmp_path)
-    path = tmp_path / "paper_trades/closed_trades.csv"
+    _session_id, paths = _create_session(handlers)
+    path = paths.closed_trades
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "symbol,direction,entry_price,exit_price,result,r,reason,candidate_source,production_would_allow,production_block_reasons\n"
@@ -344,14 +362,15 @@ def test_gates_shows_zero_counters_when_no_closed_trades(tmp_path):
 
 def test_gates_shows_saved_missed_allowed_analytics(tmp_path):
     handlers = _handlers(tmp_path)
-    handlers.control.status_store.update(
+    session_id, paths = _create_session(handlers)
+    handlers.control.session_manager.session_status_store(session_id).update(
         production_would_allow_count=2,
         production_would_block_count=2,
         shadow_blocked_but_tracked_count=2,
         shadow_gate_block_counts={"rsi_gate": 1, "market_mode_15m_gate": 1},
         last_shadow_block_reasons=["rsi_below_35"],
     )
-    path = tmp_path / "paper_trades/closed_trades.csv"
+    path = paths.closed_trades
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "production_would_allow,r\n"

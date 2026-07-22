@@ -260,7 +260,9 @@ Safety
 
 `/start_live` and the `Start Live Research` button show a confirmation screen first. The confirmation queues only `START_LIVE_RESEARCH`; it does not start trading, testnet, or production execution.
 
-`Stop Live Research` queues `STOP_LIVE_RESEARCH`, writes a stop report path back to Telegram, and lets the separate live research engine flush paper artifacts and exit safely when it processes the queue.
+Each confirmed Start creates a new immutable research identity. Start is accepted only after the previous session reaches `stopped`; `running`, `start_requested`, `stop_requested`, and `stopping` cannot create another session.
+
+`Stop Live Research` queues `STOP_LIVE_RESEARCH` for the active `session_id`. The engine finishes the current iteration, preserves unresolved paper positions as `UNRESOLVED_AT_SESSION_END`, writes a final session report, and then changes the global state to `stopped`. A later Start creates a clean session and does not restore positions from the completed one.
 
 ## Railway Single Service
 
@@ -293,11 +295,30 @@ CRYPTO13_INTERVAL_SEC=60
 
 `CRYPTO13_SYMBOLS` no longer narrows the default runtime universe. Symbols that are unavailable from the public market-data source remain configured and are reported separately in runtime status.
 
-Runtime status is written to:
+Global service/lifetime status is written to:
 
 ```text
-data/runtime/runtime_status.json
+data/runtime/global_runtime_status.json
 ```
+
+Each Start creates:
+
+```text
+data/sessions/<session_id>/
+  manifest.json
+  config_snapshot.json
+  runtime_status.json
+  paper_trades/open_positions.json
+  paper_trades/closed_trades.csv
+  events/
+  reports/
+```
+
+The `session_id` format is `research-<UTC timestamp>-<random suffix>`. Session counters, candle checkpoints, positions, trades, events, and reports are isolated. Lifetime counters remain in the global status.
+
+`Export Data` selects the active session by default, then the last completed session. `/export_data <session_id>` exports one explicit session. Exports include its manifest and config snapshot and never treat legacy root CSV files as current-session data.
+
+The pre-session files under `data/runtime/runtime_status.json` and `data/paper_trades/` remain untouched and are registered as `legacy_session_unscoped`.
 
 Safety metadata remains fixed to paper-only:
 
@@ -307,7 +328,7 @@ testnet_orders_enabled=false
 private_api_used=false
 ```
 
-`/live_stop` stops only the live paper engine and flushes paper artifacts. Telegram remains available in the same Railway service so `/live_start` can request a restart.
+`/live_stop` stops only the active live paper session and flushes its artifacts. Telegram remains available in the same Railway service. A new `/live_start` is accepted only after status is fully `stopped`.
 
 Legacy separate commands remain available as local fallback, but Railway should use `run-all`.
 
