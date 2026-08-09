@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
+import os
+import shutil
 import threading
 from pathlib import Path
 from typing import Any
@@ -10,6 +13,14 @@ from .order_models import Position, Trade
 
 
 _STORAGE_LOCK = threading.RLock()
+
+
+class ClosedTradesRollbackError(OSError):
+    pass
+
+
+class ClosedTradesSchemaError(RuntimeError):
+    pass
 
 
 class LivePaperStorage:
@@ -28,6 +39,11 @@ class LivePaperStorage:
         )
         self.open_positions_path.parent.mkdir(parents=True, exist_ok=True)
         self.runtime_status_path.parent.mkdir(parents=True, exist_ok=True)
+        self._closed_identities: set[str] | None = None
+        self._closed_signal_ids: set[str] | None = None
+        self._closed_count: int | None = None
+        self._closed_signature: tuple[int, int, int] | None = None
+        self._closed_rows_snapshot: list[dict[str, Any]] | None = None
 
     def paths(self) -> dict[str, str]:
         return {
@@ -37,7 +53,7 @@ class LivePaperStorage:
         }
 
     def diagnostics(self) -> dict[str, Any]:
-        return {
+        diagnostics = {
             "runtime_data_directory": str(self.data_root),
             "runtime_status_path": str(self.runtime_status_path),
             "open_positions_path": str(self.open_positions_path),
@@ -49,6 +65,33 @@ class LivePaperStorage:
                 "closed_trades": self.closed_trades_path.exists(),
             },
         }
+        try:
+            usage = shutil.disk_usage(self.data_root)
+            used_pct = (usage.used / usage.total * 100.0) if usage.total else 0.0
+            if used_pct >= 95.0:
+                level = "critical"
+            elif used_pct >= 85.0:
+                level = "high"
+            elif used_pct >= 70.0:
+                level = "warning"
+            else:
+                level = "normal"
+            diagnostics["storage_usage"] = {
+                "available": True,
+                "total_bytes": int(usage.total),
+                "used_bytes": int(usage.used),
+                "free_bytes": int(usage.free),
+                "used_percent": round(used_pct, 2),
+                "level": level,
+                "warning": None if level == "normal" else f"storage_usage_{level}",
+            }
+        except Exception as exc:  # noqa: BLE001 - diagnostics must never stop research.
+            diagnostics["storage_usage"] = {
+                "available": False,
+                "level": "unknown",
+                "warning": f"disk_stats_unavailable:{type(exc).__name__}",
+            }
+        return diagnostics
 
     def load_open_positions(self) -> list[Position]:
         with _STORAGE_LOCK:
@@ -83,7 +126,13 @@ class LivePaperStorage:
     def load_closed_trades(self) -> list[Trade]:
         with _STORAGE_LOCK:
             trades = []
-            for row in self._read_closed_rows():
+            self._ensure_closed_indexes()
+            rows = self._closed_rows_snapshot
+            if rows is None:
+                rows = self._read_closed_rows()
+                self._cache_closed_indexes(rows)
+            self._closed_rows_snapshot = None
+            for row in rows:
                 payload = self._deserialize_trade_row(row)
                 required = {
                     "trade_id",
@@ -117,8 +166,16 @@ class LivePaperStorage:
                 restored += 1
         return restored
 
-    def mark_open_positions_unresolved(self) -> int:
-        positions = self.load_open_positions()
+    def mark_open_positions_unresolved(
+        self,
+        closed_signal_ids: set[str] | None = None,
+    ) -> int:
+        closed_ids = closed_signal_ids or set()
+        positions = [
+            position
+            for position in self.load_open_positions()
+            if not position.signal_id or position.signal_id not in closed_ids
+        ]
         for position in positions:
             position.session_final_status = "UNRESOLVED_AT_SESSION_END"
         rows = [dict(position.__dict__) for position in positions]
@@ -151,11 +208,11 @@ class LivePaperStorage:
             self.closed_trades_path.parent.mkdir(parents=True, exist_ok=True)
             if not trades:
                 if not self.closed_trades_path.exists():
-                    self.closed_trades_path.write_text("", encoding="utf-8")
+                    self.closed_trades_path.touch()
                 return str(self.closed_trades_path)
 
-            existing = self._read_closed_rows()
-            known = {self._row_identity(row) for row in existing if self._row_identity(row)}
+            self._ensure_closed_indexes()
+            known = set(self._closed_identities or set())
             additions = []
             for trade in trades:
                 row = self._serialize_trade_row(dict(trade.__dict__))
@@ -166,7 +223,18 @@ class LivePaperStorage:
                 if identity:
                     known.add(identity)
             if additions:
-                self._write_closed_rows([*existing, *additions])
+                self._append_closed_rows(additions)
+                self._closed_identities = known
+                signal_ids = self._closed_signal_ids or set()
+                signal_ids.update(
+                    str(row["signal_id"])
+                    for row in additions
+                    if row.get("signal_id")
+                )
+                self._closed_signal_ids = signal_ids
+                self._closed_count = int(self._closed_count or 0) + len(additions)
+                self._closed_signature = self._closed_file_signature()
+                self._closed_rows_snapshot = None
         return str(self.closed_trades_path)
 
     def _serialize_trade_row(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -230,15 +298,40 @@ class LivePaperStorage:
 
     def closed_trades_count(self) -> int:
         with _STORAGE_LOCK:
-            return len(self._read_closed_rows())
+            self._ensure_closed_indexes()
+            return int(self._closed_count or 0)
 
     def closed_signal_ids(self) -> set[str]:
         with _STORAGE_LOCK:
-            return {
-                str(row["signal_id"])
-                for row in self._read_closed_rows()
-                if row.get("signal_id")
-            }
+            self._ensure_closed_indexes()
+            return set(self._closed_signal_ids or set())
+
+    def _ensure_closed_indexes(self) -> None:
+        signature = self._closed_file_signature()
+        if self._closed_identities is not None and self._closed_signature == signature:
+            return
+        self._cache_closed_indexes(self._read_closed_rows())
+
+    def _cache_closed_indexes(self, rows: list[dict[str, Any]]) -> None:
+        self._closed_identities = {
+            identity
+            for row in rows
+            if (identity := self._row_identity(row))
+        }
+        self._closed_signal_ids = {
+            str(row["signal_id"])
+            for row in rows
+            if row.get("signal_id")
+        }
+        self._closed_count = len(rows)
+        self._closed_signature = self._closed_file_signature()
+        self._closed_rows_snapshot = rows
+
+    def _closed_file_signature(self) -> tuple[int, int, int]:
+        if not self.closed_trades_path.exists():
+            return (0, 0, 0)
+        stat = self.closed_trades_path.stat()
+        return (int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
 
     def _read_closed_rows(self) -> list[dict[str, Any]]:
         if not self.closed_trades_path.exists() or self.closed_trades_path.stat().st_size == 0:
@@ -246,14 +339,70 @@ class LivePaperStorage:
         with self.closed_trades_path.open("r", encoding="utf-8", newline="") as handle:
             return list(csv.DictReader(handle))
 
-    def _write_closed_rows(self, rows: list[dict[str, Any]]) -> None:
-        fields = sorted({key for row in rows for key in row})
-        temp_path = self.closed_trades_path.with_suffix(".csv.tmp")
-        with temp_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields)
+    def _append_closed_rows(self, rows: list[dict[str, Any]]) -> None:
+        original_size = self.closed_trades_path.stat().st_size if self.closed_trades_path.exists() else 0
+        fields = self._closed_fieldnames(rows, original_size)
+        buffer = io.StringIO(newline="")
+        if original_size and not self._closed_file_ends_with_newline():
+            buffer.write("\n")
+        writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+        if original_size == 0:
             writer.writeheader()
-            writer.writerows(rows)
-        temp_path.replace(self.closed_trades_path)
+        writer.writerows(rows)
+        payload = buffer.getvalue().encode("utf-8")
+
+        descriptor = os.open(
+            self.closed_trades_path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o644,
+        )
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("closed trades append made no progress")
+                view = view[written:]
+            os.fsync(descriptor)
+        except OSError as append_error:
+            try:
+                os.ftruncate(descriptor, original_size)
+                os.fsync(descriptor)
+            except OSError as rollback_error:
+                raise ClosedTradesRollbackError(
+                    rollback_error.errno or append_error.errno,
+                    "closed trades append rollback failed",
+                ) from append_error
+            raise
+        finally:
+            os.close(descriptor)
+
+    def _closed_fieldnames(self, rows: list[dict[str, Any]], original_size: int) -> list[str]:
+        if original_size:
+            with self.closed_trades_path.open("r", encoding="utf-8", newline="") as handle:
+                fields = next(csv.reader(handle), [])
+            if not fields:
+                raise ClosedTradesSchemaError(
+                    f"Closed trades CSV has no header: {self.closed_trades_path}"
+                )
+            extra_values = {
+                key
+                for row in rows
+                for key, value in row.items()
+                if key not in fields and value not in (None, "", [], {})
+            }
+            if extra_values:
+                raise ClosedTradesSchemaError(
+                    "Closed trades CSV schema mismatch; missing columns: "
+                    + ", ".join(sorted(extra_values))
+                )
+            return fields
+        return sorted({key for row in rows for key in row})
+
+    def _closed_file_ends_with_newline(self) -> bool:
+        with self.closed_trades_path.open("rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            return handle.read(1) in {b"\n", b"\r"}
 
     def _row_identity(self, row: dict[str, Any]) -> str | None:
         return str(row.get("signal_id") or row.get("trade_id") or "") or None

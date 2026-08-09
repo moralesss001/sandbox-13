@@ -1,6 +1,13 @@
-import pandas as pd
+import errno
 
+import pandas as pd
+import pytest
+
+from src.live_paper_storage import ClosedTradesSchemaError, LivePaperStorage
 from src.live_research_engine import LiveResearchEngine
+from src.order_models import SignalCandidate
+from src.paper_broker import PaperBroker
+from src.portfolio import PaperPortfolio
 from src.runtime_status import RuntimeStatusStore
 
 
@@ -36,7 +43,9 @@ def test_live_research_runs_one_safe_iteration(monkeypatch, tmp_path):
     result = engine.run(["BTCUSDT"], "15m", max_iterations=1)
 
     assert result["signal_source"] == "research_simplified_live"
-    assert store.read()["last_processed_candles"]["BTCUSDT:15m"]
+    status = store.read()
+    assert status["last_processed_candles"]["BTCUSDT:15m"]
+    assert status["storage_usage"]["level"] in {"normal", "warning", "high", "critical"}
 
 
 def test_live_research_avoids_duplicate_closed_candles(monkeypatch, tmp_path):
@@ -98,22 +107,65 @@ def test_recovered_symbol_moves_from_unavailable_to_active(monkeypatch, tmp_path
     assert status["unavailable_symbol_reasons"] == {}
 
 
-def test_internal_processing_error_does_not_mark_market_data_unavailable(monkeypatch, tmp_path):
-    monkeypatch.setattr("src.live_research_engine.get_latest_klines", lambda *_args, **_kwargs: _klines())
+def test_fatal_storage_error_stops_symbol_loop_and_propagates(monkeypatch, tmp_path):
+    requested = []
+    monkeypatch.setattr(
+        "src.live_research_engine.get_latest_klines",
+        lambda symbol, *_args, **_kwargs: requested.append(symbol) or _klines(),
+    )
     monkeypatch.setattr(
         "src.live_research_engine.LiveResearchEngine._save_live_market",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError(errno.ENOSPC, "No space left on device")
+        ),
     )
     store = RuntimeStatusStore(tmp_path / "runtime/status.json")
     engine = LiveResearchEngine({"api": {"mode": "paper"}, "safety": {}}, data_root=tmp_path, status_store=store)
 
-    engine.run(["BTCUSDT"], "15m", max_iterations=1)
-    status = store.read()
+    with pytest.raises(OSError) as exc_info:
+        engine.run(["BTCUSDT", "ETHUSDT"], "15m", max_iterations=1)
 
-    assert status["active_symbols"] == ["BTCUSDT"]
-    assert status["unavailable_symbols"] == []
-    assert status["unavailable_symbol_reasons"] == {}
-    assert status["errors"][-1]["error"] == "BTCUSDT 15m internal: OSError"
+    assert exc_info.value.errno == errno.ENOSPC
+    assert requested == ["BTCUSDT"]
+
+
+def test_closed_trade_schema_error_is_fatal_and_stops_symbol_loop(monkeypatch, tmp_path):
+    storage = LivePaperStorage(tmp_path)
+    portfolio = PaperPortfolio("baseline_rr15")
+    broker = PaperBroker(portfolio)
+    broker.open_position(
+        SignalCandidate(
+            symbol="BTCUSDT",
+            timeframe="15m",
+            direction="LONG",
+            entry=100.0,
+            tp=105.0,
+            sl=95.0,
+            created_at="2026-08-09T00:00:00+00:00",
+        )
+    )
+    storage.save_open_positions({"baseline_rr15": portfolio})
+    storage.closed_trades_path.write_text(
+        "signal_id,trade_id,result\nlegacy-signal,legacy-trade,win\n",
+        encoding="utf-8",
+    )
+    requested = []
+    monkeypatch.setattr(
+        "src.live_research_engine.get_latest_klines",
+        lambda symbol, *_args, **_kwargs: requested.append(symbol) or _klines(),
+    )
+    store = RuntimeStatusStore(storage.runtime_status_path)
+    engine = LiveResearchEngine(
+        {"api": {"mode": "paper"}, "safety": {}},
+        data_root=tmp_path,
+        status_store=store,
+    )
+
+    with pytest.raises(ClosedTradesSchemaError):
+        engine.run(["BTCUSDT", "ETHUSDT"], "15m", max_iterations=1)
+
+    assert requested == ["BTCUSDT"]
+    assert LivePaperStorage(tmp_path).closed_trades_count() == 1
 
 
 def test_malformed_symbol_candles_do_not_stop_remaining_universe(monkeypatch, tmp_path):

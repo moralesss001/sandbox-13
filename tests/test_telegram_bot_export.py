@@ -1,3 +1,4 @@
+import errno
 from pathlib import Path
 
 from src.telegram_bot import TelegramBot
@@ -73,3 +74,50 @@ def test_export_delivery_reports_only_successful_documents(monkeypatch, tmp_path
     assert "Sent:\n- runtime_status.json" in messages[-1][1]
     assert "Missing:\n- closed_trades.csv" in messages[-1][1]
     assert messages[-1][2] == {"inline_keyboard": []}
+
+
+def test_storage_failure_in_callback_does_not_stop_next_telegram_update(monkeypatch):
+    delivered = []
+
+    class Handlers:
+        def handle_callback(self, *_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def handle_message(self, *_args, **_kwargs):
+            return TelegramResponse("status still available")
+
+    bot = TelegramBot("token", Handlers())
+    monkeypatch.setattr(
+        bot,
+        "_get_updates",
+        lambda _offset: [
+            {
+                "update_id": 1,
+                "callback_query": {
+                    "id": "callback-1",
+                    "data": "control:stop_live_confirmed",
+                    "from": {"id": 123},
+                    "message": {"chat": {"id": 123}},
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "text": "/status",
+                    "from": {"id": 123},
+                    "chat": {"id": 123},
+                },
+            },
+        ],
+    )
+    monkeypatch.setattr(bot, "_answer_callback", lambda _callback_id: None)
+    monkeypatch.setattr(
+        bot,
+        "_deliver_response",
+        lambda _chat_id, response: delivered.append(response.text),
+    )
+
+    bot.run(once=True)
+
+    assert "Storage failure detected errno=28" in delivered[0]
+    assert delivered[1] == "status still available"

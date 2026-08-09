@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import subprocess
 import sys
 import threading
@@ -14,6 +15,10 @@ from src.run_all import (
     run_all,
     write_run_all_status,
 )
+from src.live_paper_storage import LivePaperStorage
+from src.order_models import SignalCandidate
+from src.paper_broker import PaperBroker
+from src.portfolio import PaperPortfolio
 from src.runtime_status import RuntimeStatusStore
 from src.research_session_manager import ResearchSessionManager
 from src.universe import CONTRACT_UNIVERSE
@@ -260,6 +265,97 @@ def test_run_all_finalizes_session_when_open_positions_storage_is_corrupt(tmp_pa
     assert manifest["status"] == "stopped"
     assert manifest["stop_reason"] == "engine_error:RuntimeError"
     assert any("open_positions_finalize: RuntimeError" in str(item) for item in session_status["errors"])
+
+
+def test_run_all_enospc_is_terminal_even_when_report_and_atomic_finalize_fail(monkeypatch, tmp_path):
+    store = RuntimeStatusStore(tmp_path / "runtime/global_runtime_status.json")
+    manager = ResearchSessionManager(tmp_path, global_status_path=store.path)
+    manager.ensure_initialized()
+    session_id, session_paths = manager.create_session(
+        {
+            "timeframe": "15m",
+            "direction": "LONG_ONLY",
+            "candidate_source": "production_like_raw",
+            "candidate_source_version": "v2",
+            "configured_symbols": ["BTCUSDT"],
+        }
+    )
+    manager.mark_start_requested(session_id)
+    session_storage = LivePaperStorage(session_paths.root)
+    portfolio = PaperPortfolio("baseline_rr15")
+    broker = PaperBroker(portfolio)
+    broker.open_position(
+        SignalCandidate(
+            symbol="BTCUSDT",
+            timeframe="15m",
+            direction="LONG",
+            entry=100.0,
+            tp=105.0,
+            sl=95.0,
+            session_id=session_id,
+            created_at="2026-08-09T00:00:00+00:00",
+        )
+    )
+    session_storage.save_open_positions({"baseline_rr15": portfolio})
+    closed = broker.update_positions({"high": 106.0, "low": 99.0})
+    session_storage.append_closed_trades(closed)
+    engine_runs = 0
+    telegram_runs = 0
+
+    class Engine:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            nonlocal engine_runs
+            engine_runs += 1
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    def telegram_runner(**_kwargs):
+        nonlocal telegram_runs
+        telegram_runs += 1
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(ResearchSessionManager, "write_failure_report", fail_write)
+    monkeypatch.setattr(ResearchSessionManager, "finalize_session", fail_write)
+
+    result = run_all(
+        config=RunAllConfig(
+            symbols=["BTCUSDT"],
+            timeframe="15m",
+            candidate_source="production_like_raw",
+            interval_sec=1,
+            data_root=str(tmp_path),
+        ),
+        telegram_runner=telegram_runner,
+        engine_factory=Engine,
+        status_store=store,
+        supervisor_runtime_sec=0.05,
+    )
+
+    manifest = __import__("json").loads(session_paths.manifest.read_text(encoding="utf-8"))
+    index = __import__("json").loads(manager.index_path.read_text(encoding="utf-8"))
+    index_entry = next(item for item in index["sessions"] if item.get("session_id") == session_id)
+    session_status = manager.session_status_store(session_id).read()
+    global_status = store.read()
+    assert result == 0
+    assert engine_runs == 1
+    assert telegram_runs >= 1
+    assert session_status["status"] == "stopped"
+    assert "errno=28" in session_status["terminal_error"]
+    assert manifest["status"] == "stopped"
+    assert manifest["stop_reason"] == "engine_error:OSError"
+    assert manifest["unresolved_open_positions_count"] == 0
+    assert index_entry["status"] == "stopped"
+    assert index_entry["stop_reason"] == "engine_error:OSError"
+    assert session_storage.load_open_positions() == []
+    assert session_storage.closed_trades_count() == 1
+    assert global_status["control_state"] == "stopped"
+    assert global_status["active_session_id"] is None
+    assert global_status["last_session_id"] == session_id
+    assert global_status["live_engine_enabled"] is False
 
 
 def test_run_all_shutdown_handler_updates_status(tmp_path):

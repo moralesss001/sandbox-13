@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,53 @@ _STATUS_FILE_LOCK = threading.RLock()
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def emergency_patch_json(path: str | Path, updates: dict[str, Any]) -> bool:
+    """Best-effort in-place patch for an existing JSON file when temp-file writes fail."""
+    target = Path(path).expanduser().resolve()
+    with _STATUS_FILE_LOCK:
+        try:
+            original = target.read_bytes()
+            payload = json.loads(original.decode("utf-8"))
+            if not isinstance(payload, dict):
+                return False
+            payload.update(updates)
+            payload["updated_at"] = utc_now()
+            encoded = (
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode("utf-8")
+            if len(encoded) > len(original):
+                return False
+            with target.open("r+b", buffering=0) as handle:
+                try:
+                    handle.seek(0)
+                    view = memoryview(encoded)
+                    while view:
+                        written = handle.write(view)
+                        if not written:
+                            raise OSError("emergency status write made no progress")
+                        view = view[written:]
+                    handle.truncate(len(encoded))
+                    os.fsync(handle.fileno())
+                except OSError:
+                    try:
+                        handle.seek(0)
+                        view = memoryview(original)
+                        while view:
+                            written = handle.write(view)
+                            if not written:
+                                break
+                            view = view[written:]
+                        handle.truncate(len(original))
+                        os.fsync(handle.fileno())
+                    except OSError:
+                        pass
+                    return False
+            return True
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
 
 
 def default_status(data_root: str | Path = "data") -> dict[str, Any]:
@@ -138,6 +186,9 @@ class RuntimeStatusStore:
             errors.append({"timestamp": utc_now(), "error": error})
             status["errors"] = errors[-limit:]
             return self.write(status)
+
+    def emergency_update(self, **updates: Any) -> bool:
+        return emergency_patch_json(self.path, updates)
 
 
 def portfolio_counts(portfolios: dict[str, Any]) -> tuple[int, int]:

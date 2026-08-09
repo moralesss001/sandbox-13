@@ -15,7 +15,7 @@ from .candidate_sources import (
 from .command_queue import CommandQueue
 from .execution_safety import validate_api_mode
 from .hypothesis_runner import HypothesisRunner
-from .live_paper_storage import LivePaperStorage
+from .live_paper_storage import ClosedTradesSchemaError, LivePaperStorage
 from .research_session_manager import ResearchSessionManager
 from .runtime_status import RuntimeStatusStore, portfolio_counts, utc_now
 from .signal_adapter import signal_from_klines
@@ -406,6 +406,8 @@ class LiveResearchEngine:
                             runner.process_signal(signal, close_from_history=False)
                             self.storage.save_open_positions(runner.portfolios)
                     last_processed[key] = close_time
+                except (OSError, ClosedTradesSchemaError):
+                    raise
                 except Exception as exc:  # noqa: BLE001 - keep other symbols running without misclassifying data.
                     self._append_error(f"{symbol} {timeframe} internal: {type(exc).__name__}")
             paths = runner.save_artifacts()

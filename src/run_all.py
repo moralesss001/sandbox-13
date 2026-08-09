@@ -223,11 +223,14 @@ def run_all(
     install_shutdown_handlers(stop_event, store)
 
     def record_lifetime_error(error: str) -> None:
-        status = store.read()
-        entry = {"timestamp": utc_now(), "error": error}
-        errors = [*list(status.get("errors") or []), entry][-20:]
-        lifetime_errors = [*list(status.get("lifetime_errors") or []), entry][-1000:]
-        store.update(errors=errors, lifetime_errors=lifetime_errors)
+        try:
+            status = store.read()
+            entry = {"timestamp": utc_now(), "error": error}
+            errors = [*list(status.get("errors") or []), entry][-20:]
+            lifetime_errors = [*list(status.get("lifetime_errors") or []), entry][-1000:]
+            store.update(errors=errors, lifetime_errors=lifetime_errors)
+        except OSError:
+            return
 
     def supervise_telegram() -> None:
         while not stop_event.is_set():
@@ -238,10 +241,18 @@ def run_all(
                 stop_event.wait(5)
 
     def supervise_engine() -> None:
+        terminal_session_ids: set[str] = set()
         while not stop_event.is_set():
             status = store.read()
             control_state = str(status.get("control_state") or "stopped")
             session_id = status.get("active_session_id")
+            if session_id and str(session_id) in terminal_session_ids:
+                try:
+                    store.update(live_engine_enabled=False)
+                except OSError:
+                    pass
+                stop_event.wait(5)
+                continue
             if control_state not in {"start_requested", "running", "stop_requested", "restart_requested"} or not session_id:
                 store.update(live_engine_enabled=False)
                 stop_event.wait(5)
@@ -262,37 +273,74 @@ def run_all(
                     candidate_source=cfg.candidate_source,
                 )
             except Exception as exc:  # noqa: BLE001 - keep Telegram available and log engine failures.
-                record_lifetime_error(f"live_research_engine: {type(exc).__name__}")
-                store.update(live_engine_enabled=False)
-                if store.read().get("active_session_id") == session_id:
+                terminal_session_ids.add(str(session_id))
+                errno_value = getattr(exc, "errno", None)
+                error_text = f"live_research_engine: {type(exc).__name__}"
+                if errno_value is not None:
+                    error_text += f" errno={errno_value}"
+                record_lifetime_error(error_text)
+                try:
+                    store.update(live_engine_enabled=False)
+                except OSError:
+                    pass
+                try:
+                    active_session_id = store.read().get("active_session_id")
+                except (OSError, ValueError):
+                    active_session_id = session_id
+                if active_session_id == session_id:
                     session_paths = manager.paths(str(session_id))
                     session_storage = LivePaperStorage(
                         session_paths.root,
                         runtime_status_path=session_paths.runtime_status,
                     )
-                    error_text = f"live_research_engine: {type(exc).__name__}"
-                    manager.session_status_store(str(session_id)).append_error(error_text)
-                    unresolved_count = 0
+                    try:
+                        manager.session_status_store(str(session_id)).append_error(error_text)
+                    except OSError:
+                        pass
+                    try:
+                        closed_signal_ids = session_storage.closed_signal_ids()
+                    except (OSError, RuntimeError):
+                        closed_signal_ids = set()
+                    try:
+                        unresolved_count = len(
+                            [
+                                position
+                                for position in session_storage.load_open_positions()
+                                if not position.signal_id or position.signal_id not in closed_signal_ids
+                            ]
+                        )
+                    except (OSError, RuntimeError):
+                        unresolved_count = 0
                     failure_reason = error_text
                     try:
-                        unresolved_count = session_storage.mark_open_positions_unresolved()
+                        unresolved_count = session_storage.mark_open_positions_unresolved(
+                            closed_signal_ids=closed_signal_ids
+                        )
                     except Exception as storage_exc:  # noqa: BLE001 - finalization must survive corrupt storage.
                         storage_error = (
                             "open_positions_finalize: "
                             f"{type(storage_exc).__name__}"
                         )
-                        manager.session_status_store(str(session_id)).append_error(storage_error)
+                        try:
+                            manager.session_status_store(str(session_id)).append_error(storage_error)
+                        except OSError:
+                            pass
                         failure_reason = f"{error_text}; {storage_error}"
-                    report_path = manager.write_failure_report(
-                        str(session_id),
-                        reason=failure_reason,
-                        unresolved_open_positions_count=unresolved_count,
-                    )
-                    manager.finalize_session(
+                    report_path = None
+                    try:
+                        report_path = manager.write_failure_report(
+                            str(session_id),
+                            reason=failure_reason,
+                            unresolved_open_positions_count=unresolved_count,
+                        )
+                    except OSError:
+                        failure_reason += "; failure_report_write: OSError"
+                    manager.finalize_failed_session_best_effort(
                         str(session_id),
                         stop_reason=f"engine_error:{type(exc).__name__}",
+                        error=failure_reason,
                         unresolved_open_positions_count=unresolved_count,
-                        latest_report_path=str(report_path),
+                        latest_report_path=str(report_path) if report_path is not None else None,
                     )
                 stop_event.wait(5)
 

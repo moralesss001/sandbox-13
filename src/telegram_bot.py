@@ -30,9 +30,12 @@ class TelegramBot:
                     user = callback.get("from") or {}
                     message = callback.get("message") or {}
                     chat = message.get("chat") or {}
-                    response = self.handlers.handle_callback(
-                        callback.get("data", ""), user.get("id"), chat.get("id")
-                    )
+                    try:
+                        response = self.handlers.handle_callback(
+                            callback.get("data", ""), user.get("id"), chat.get("id")
+                        )
+                    except OSError as exc:
+                        response = self._storage_error_response(exc)
                     self._answer_callback(callback.get("id"))
                     self._deliver_response(chat.get("id"), response)
                 else:
@@ -40,11 +43,24 @@ class TelegramBot:
                     chat = message.get("chat") or {}
                     user = message.get("from") or {}
                     text = message.get("text") or ""
-                    response = self.handlers.handle_message(text, user.get("id"), chat.get("id"))
+                    try:
+                        response = self.handlers.handle_message(text, user.get("id"), chat.get("id"))
+                    except OSError as exc:
+                        response = self._storage_error_response(exc)
                     self._deliver_response(chat.get("id"), response)
             if once:
                 return
             time.sleep(self.poll_interval_sec)
+
+    def _storage_error_response(self, exc: OSError) -> TelegramResponse:
+        errno_value = getattr(exc, "errno", None)
+        detail = f" errno={errno_value}" if errno_value is not None else ""
+        return TelegramResponse(
+            "Storage failure detected"
+            + detail
+            + ". The requested action was not completed. "
+            "Telegram control remains online; check runtime diagnostics and mounted storage."
+        )
 
     def _get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         params = {"timeout": 20}

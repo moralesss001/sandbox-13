@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .runtime_status import RuntimeStatusStore, utc_now
+from .runtime_status import RuntimeStatusStore, emergency_patch_json, utc_now
 
 
 GLOBAL_STATUS_FILENAME = "global_runtime_status.json"
@@ -309,6 +309,72 @@ class ResearchSessionManager:
                     latest_report_path=latest_report_path,
                     live_engine_enabled=False,
                 )
+            return manifest
+
+    def finalize_failed_session_best_effort(
+        self,
+        session_id: str,
+        *,
+        stop_reason: str,
+        error: str,
+        unresolved_open_positions_count: int,
+        latest_report_path: str | None,
+    ) -> dict[str, Any]:
+        try:
+            return self.finalize_session(
+                session_id,
+                stop_reason=stop_reason,
+                unresolved_open_positions_count=unresolved_open_positions_count,
+                latest_report_path=latest_report_path,
+            )
+        except OSError:
+            paths = self.paths(session_id)
+            ended_at = utc_now()
+            session_updates = {
+                "status": "stopped",
+                "ended_at": ended_at,
+                "terminal_error": error,
+                "unresolved_open_positions_count": int(unresolved_open_positions_count),
+                "latest_report_path": latest_report_path,
+            }
+            session_saved = self.session_status_store(session_id).emergency_update(**session_updates)
+            manifest_updates = {
+                "status": "stopped",
+                "ended_at": ended_at,
+                "stop_reason": stop_reason,
+                "unresolved_open_positions_count": int(unresolved_open_positions_count),
+                "latest_report_path": latest_report_path,
+            }
+            manifest_saved = emergency_patch_json(paths.manifest, manifest_updates)
+            index = self._read_json(self.index_path, {"sessions": []})
+            sessions = [
+                {**item, **manifest_updates}
+                if item.get("session_id") == session_id
+                else item
+                for item in list(index.get("sessions") or [])
+            ]
+            index_saved = emergency_patch_json(self.index_path, {"sessions": sessions})
+            global_saved = self.global_status_store.emergency_update(
+                control_state="stopped",
+                active_session_id=None,
+                active_session_paths=None,
+                last_session_id=session_id,
+                session_id=session_id,
+                session_status="stopped",
+                session_ended_at=ended_at,
+                terminal_error=error,
+                unresolved_open_positions_count=int(unresolved_open_positions_count),
+                latest_report_path=latest_report_path,
+                live_engine_enabled=False,
+            )
+            manifest = self._read_json(paths.manifest, {})
+            manifest.update(manifest_updates)
+            manifest["emergency_persistence"] = {
+                "session_status": session_saved,
+                "manifest": manifest_saved,
+                "session_index": index_saved,
+                "global_status": global_saved,
+            }
             return manifest
 
     def paths(self, session_id: str) -> SessionPaths:
