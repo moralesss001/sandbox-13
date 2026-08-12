@@ -79,6 +79,15 @@ class SignalCandidate:
     production_would_allow: bool = True
     production_block_reasons: list[str] = field(default_factory=list)
     shadow_gate_block_reasons: list[str] = field(default_factory=list)
+    market_profile_v1: str = "UNKNOWN"
+    market_profile_confidence: str = "LOW"
+    rsi_zone: str = "UNKNOWN"
+    profile_low_rsi: bool = False
+    profile_very_low_rsi: bool = False
+    profile_htf_short: bool = False
+    profile_macd_false: bool = False
+    profile_market_phase: str = "UNKNOWN"
+    profile_session: str = "UNKNOWN"
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -147,6 +156,15 @@ class Position:
     production_would_allow: bool = True
     production_block_reasons: list[str] = field(default_factory=list)
     shadow_gate_block_reasons: list[str] = field(default_factory=list)
+    market_profile_v1: str = "UNKNOWN"
+    market_profile_confidence: str = "LOW"
+    rsi_zone: str = "UNKNOWN"
+    profile_low_rsi: bool = False
+    profile_very_low_rsi: bool = False
+    profile_htf_short: bool = False
+    profile_macd_false: bool = False
+    profile_market_phase: str = "UNKNOWN"
+    profile_session: str = "UNKNOWN"
     session_final_status: str | None = None
 
 

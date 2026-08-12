@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .candidate_sources import PRODUCTION_LIKE_RAW_METADATA
+from .market_profile import attach_market_profile
 from .order_models import SignalCandidate
 from .production_parity_15m import evaluate_15m_long_candidate
 from .session_classifier import normalize_session
@@ -83,4 +84,4 @@ def production_like_raw_signal_from_klines(
         **PRODUCTION_LIKE_RAW_METADATA.as_candidate_kwargs(),
         raw=raw,
     )
-    return attach_shadow_gate_metadata(candidate)
+    return attach_shadow_gate_metadata(attach_market_profile(candidate))

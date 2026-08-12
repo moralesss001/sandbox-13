@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from .gate_analytics import summarize_gate_outcomes
+from .research5_reporting import research_005_report_sections
 
 
 def _fmt(value: Any) -> str:
@@ -156,5 +157,7 @@ def build_demo_report(
         "- Do not treat paper/testnet candidates as production proof.",
         "- Send all production decisions back to Crypto13 HQ.",
     ]
+    if "block_multiple_reasons" in metrics:
+        lines.extend(["", research_005_report_sections(result.get("portfolios", {}), metrics)])
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report_path

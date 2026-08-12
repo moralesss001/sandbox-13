@@ -273,6 +273,10 @@ class LivePaperStorage:
             "is_placeholder",
             "edge_conclusions_allowed",
             "production_would_allow",
+            "profile_low_rsi",
+            "profile_very_low_rsi",
+            "profile_htf_short",
+            "profile_macd_false",
         }
         list_fields = {"production_block_reasons", "shadow_gate_block_reasons"}
         payload: dict[str, Any] = {}

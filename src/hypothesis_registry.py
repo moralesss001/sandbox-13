@@ -18,11 +18,40 @@ class Hypothesis:
     enabled: bool = True
     priority: int = 100
     evaluator: Rule | None = None
+    condition_key: str | None = None
+    condition_version: int | None = None
 
     def decide(self, signal: SignalCandidate) -> HypothesisDecision:
         if self.evaluator is None:
             return HypothesisDecision(self.hypothesis_id, HypothesisDecisionType.ALLOW.value)
         return self.evaluator(signal)
+
+
+class HypothesisEvaluatorVersionError(RuntimeError):
+    pass
+
+
+class VersionedEvaluatorRegistry:
+    def __init__(self) -> None:
+        self._evaluators: dict[tuple[str, int], Rule] = {}
+
+    def register(self, condition_key: str, condition_version: int, evaluator: Rule) -> None:
+        identity = (str(condition_key), int(condition_version))
+        if identity in self._evaluators:
+            raise ValueError(
+                f"Duplicate hypothesis evaluator registration: {identity[0]}@v{identity[1]}"
+            )
+        self._evaluators[identity] = evaluator
+
+    def resolve(self, condition_key: str, condition_version: int) -> Rule:
+        identity = (str(condition_key), int(condition_version))
+        try:
+            return self._evaluators[identity]
+        except KeyError as exc:
+            raise HypothesisEvaluatorVersionError(
+                f"Incompatible or missing hypothesis evaluator version: "
+                f"{identity[0]}@v{identity[1]}"
+            ) from exc
 
 
 def _allow(hypothesis_id: str) -> Rule:
@@ -327,8 +356,19 @@ class HypothesisRegistry:
         self,
         hypotheses: list[Hypothesis] | None = None,
         include_research_pack_2: bool = False,
+        research_pack_id: str | None = None,
     ):
-        self._hypotheses = hypotheses or default_hypotheses(include_research_pack_2)
+        self.research_pack_id = research_pack_id or "legacy_default"
+        if hypotheses is not None:
+            self._hypotheses = hypotheses
+        elif research_pack_id == "research_005":
+            from .research_pack5 import research_pack_005_hypotheses
+
+            self._hypotheses = research_pack_005_hypotheses()
+        elif research_pack_id in {None, "legacy_default"}:
+            self._hypotheses = default_hypotheses(include_research_pack_2)
+        else:
+            raise ValueError(f"Unknown research pack: {research_pack_id}")
 
     def enabled(self) -> list[Hypothesis]:
         return sorted([h for h in self._hypotheses if h.enabled], key=lambda h: h.priority)
@@ -341,3 +381,64 @@ class HypothesisRegistry:
             if hypothesis.hypothesis_id == hypothesis_id:
                 return hypothesis
         raise KeyError(hypothesis_id)
+
+    @classmethod
+    def from_snapshot(cls, snapshot: dict) -> "HypothesisRegistry":
+        pack_id = str(snapshot.get("research_pack_id") or "legacy_default")
+        specs = list(snapshot.get("hypotheses") or [])
+        if not specs:
+            raise ValueError("Session snapshot contains no hypotheses")
+
+        if pack_id == "research_005":
+            from .research_pack5 import research_pack_005_evaluator_registry
+
+            evaluators = research_pack_005_evaluator_registry()
+            frozen = []
+            for spec in specs:
+                condition_key = spec.get("condition_key")
+                condition_version = spec.get("condition_version")
+                if condition_key in {None, ""} or condition_version is None:
+                    raise HypothesisEvaluatorVersionError(
+                        "Research #005 snapshot is missing versioned hypothesis execution metadata"
+                    )
+                hypothesis_id = str(spec.get("hypothesis_id") or "")
+                if hypothesis_id != str(condition_key):
+                    raise HypothesisEvaluatorVersionError(
+                        "Research #005 snapshot hypothesis_id does not match condition_key"
+                    )
+                evaluator = evaluators.resolve(str(condition_key), int(condition_version))
+                frozen.append(
+                    Hypothesis(
+                        hypothesis_id=hypothesis_id,
+                        name=str(spec.get("name") or spec.get("hypothesis_id") or ""),
+                        description="Restored from immutable Research #005 snapshot.",
+                        rules=list(spec.get("rules") or []),
+                        enabled=bool(spec.get("enabled", True)),
+                        priority=int(spec.get("priority", 100)),
+                        evaluator=evaluator,
+                        condition_key=str(condition_key),
+                        condition_version=int(condition_version),
+                    )
+                )
+            return cls(hypotheses=frozen, research_pack_id=pack_id)
+
+        current = cls(research_pack_id=pack_id)
+        current_by_id = {item.hypothesis_id: item for item in current.all()}
+        frozen = []
+        for spec in specs:
+            hypothesis_id = str(spec.get("hypothesis_id") or "")
+            if hypothesis_id not in current_by_id:
+                raise ValueError(f"Snapshot hypothesis is unavailable: {hypothesis_id}")
+            implementation = current_by_id[hypothesis_id]
+            frozen.append(
+                Hypothesis(
+                    hypothesis_id=hypothesis_id,
+                    name=str(spec.get("name") or implementation.name),
+                    description=implementation.description,
+                    rules=list(spec.get("rules") or implementation.rules),
+                    enabled=bool(spec.get("enabled", True)),
+                    priority=int(spec.get("priority", implementation.priority)),
+                    evaluator=implementation.evaluator,
+                )
+            )
+        return cls(hypotheses=frozen, research_pack_id=pack_id)

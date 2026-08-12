@@ -89,6 +89,15 @@ class PaperBroker:
             production_would_allow=signal.production_would_allow,
             production_block_reasons=signal.production_block_reasons,
             shadow_gate_block_reasons=signal.shadow_gate_block_reasons,
+            market_profile_v1=signal.market_profile_v1,
+            market_profile_confidence=signal.market_profile_confidence,
+            rsi_zone=signal.rsi_zone,
+            profile_low_rsi=signal.profile_low_rsi,
+            profile_very_low_rsi=signal.profile_very_low_rsi,
+            profile_htf_short=signal.profile_htf_short,
+            profile_macd_false=signal.profile_macd_false,
+            profile_market_phase=signal.profile_market_phase,
+            profile_session=signal.profile_session,
         )
         if not self.portfolio.add_open_position(position):
             return ExecutionResult(status="DUPLICATE", reason="signal_already_open")

@@ -8,6 +8,7 @@ import pandas as pd
 from .candidate_sources import PRODUCTION_LIKE_RAW_METADATA
 from .command_queue import CommandQueue
 from .hypothesis_registry import HypothesisRegistry
+from .research_pack5 import RESEARCH_PACK_005_ID
 from .research_session_manager import ResearchSessionManager
 from .runtime_status import RuntimeStatusStore
 from .telegram_buttons import (
@@ -27,6 +28,7 @@ class TelegramControlPanel:
         status_store: RuntimeStatusStore | None = None,
         command_queue: CommandQueue | None = None,
         data_root: str | Path = "data",
+        registry: HypothesisRegistry | None = None,
     ):
         self.data_root = Path(data_root).expanduser().resolve()
         self.session_manager = ResearchSessionManager(
@@ -36,7 +38,7 @@ class TelegramControlPanel:
         self.status_store = status_store or self.session_manager.global_status_store
         self.session_manager.ensure_initialized()
         self.command_queue = command_queue or CommandQueue(self.data_root / "runtime/commands.jsonl")
-        self.registry = HypothesisRegistry()
+        self.registry = registry or HypothesisRegistry(research_pack_id=RESEARCH_PACK_005_ID)
         self.live_reporter = TelegramLivePaperReporter(
             self.status_store,
             self.data_root,
@@ -530,6 +532,8 @@ class TelegramControlPanel:
                 "enabled": item.enabled,
                 "priority": item.priority,
                 "rules": list(item.rules),
+                "condition_key": item.condition_key,
+                "condition_version": item.condition_version,
             }
             for item in self.registry.enabled()
         ]
@@ -539,6 +543,7 @@ class TelegramControlPanel:
             "candidate_source": PRODUCTION_LIKE_RAW_METADATA.candidate_source,
             "candidate_source_version": PRODUCTION_LIKE_RAW_METADATA.candidate_source_version,
             "configured_symbols": list(symbols),
+            "research_pack_id": self.registry.research_pack_id,
             "hypotheses": hypotheses,
             "hard_shadow_gates": {
                 "rsi": {"minimum": 35.0, "maximum": 65.0},

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,8 +15,10 @@ from .candidate_sources import (
 )
 from .command_queue import CommandQueue
 from .execution_safety import validate_api_mode
+from .hypothesis_registry import HypothesisRegistry
 from .hypothesis_runner import HypothesisRunner
 from .live_paper_storage import ClosedTradesSchemaError, LivePaperStorage
+from .research5_reporting import research_005_report_sections
 from .research_session_manager import ResearchSessionManager
 from .runtime_status import RuntimeStatusStore, portfolio_counts, utc_now
 from .signal_adapter import signal_from_klines
@@ -79,6 +82,7 @@ class LiveResearchEngine:
         paper_cfg = self.config.get("paper_trading", {})
         closed_signal_ids = self.storage.closed_signal_ids()
         runner = HypothesisRunner(
+            registry=self._session_registry(),
             starting_balance_usdt=float(paper_cfg.get("starting_balance_usdt", 1000)),
             default_position_size_usdt=float(paper_cfg.get("default_position_size_usdt", 100)),
             leverage=float(paper_cfg.get("leverage", 10)),
@@ -464,6 +468,14 @@ class LiveResearchEngine:
             **self._candidate_result_fields(source_metadata),
         }
 
+    def _session_registry(self) -> HypothesisRegistry:
+        if self.session_id:
+            snapshot_path = self.session_manager.paths(self.session_id).config_snapshot
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            return HypothesisRegistry.from_snapshot(snapshot)
+        pack_id = str(self.config.get("research_pack_id") or "legacy_default")
+        return HypothesisRegistry(research_pack_id=pack_id)
+
     def _update_open_positions(self, runner: HypothesisRunner, symbol: str, candle: dict[str, Any]) -> list:
         closed_trades = []
         for broker in runner.brokers.values():
@@ -688,6 +700,8 @@ class LiveResearchEngine:
             "- Testnet orders disabled.",
             "- Telegram requested stop through safe control queue.",
         ]
+        if runner.registry.research_pack_id == "research_005":
+            lines.extend(["", research_005_report_sections(runner.portfolios, runner.metrics())])
         with path.open("x", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
         return path
