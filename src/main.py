@@ -70,6 +70,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     live.add_argument("--out", default=None, help="Demo report output directory; defaults under CRYPTO13_DATA_ROOT")
 
+    shadow = subparsers.add_parser("live-shadow", help="Bounded strategy-free public shadow collector")
+    shadow.add_argument("--data-root", required=True, help="New isolated root, or existing root with --resume-session")
+    shadow.add_argument("--symbols", default="BTCUSDT,ETHUSDT")
+    shadow.add_argument("--max-iterations", type=int, default=1)
+    shadow.add_argument("--resume-session", default=None)
+
+    legacy_shadow = subparsers.add_parser("legacy-shadow", help="Archived Auto signals with separate model execution")
+    legacy_shadow.add_argument("--data-root", required=True)
+    legacy_shadow.add_argument("--max-iterations", type=int, default=1)
+    legacy_shadow.add_argument("--run-forever", action="store_true")
+    legacy_shadow.add_argument("--resume-session", default=None)
+
     fetch = subparsers.add_parser("fetch-klines", help="Fetch Binance Futures public klines")
     fetch.add_argument("--symbol", required=True)
     fetch.add_argument("--tf", default="15m")
@@ -101,7 +113,17 @@ def main() -> None:
     safety_config = {"mode": config.get("api", {}).get("mode", "paper"), **config.get("safety", {})}
     validate_api_mode(safety_config)
 
-    if args.command == "replay":
+    if args.command == "legacy-shadow":
+        from .live_shadow import run_legacy_shadow_command
+
+        print(run_legacy_shadow_command(args.data_root, args.max_iterations,
+                                        args.run_forever, args.resume_session))
+    elif args.command == "live-shadow":
+        from .live_shadow import run_shadow_command
+
+        print(run_shadow_command(args.data_root, args.symbols.split(","),
+                                 args.max_iterations, args.resume_session))
+    elif args.command == "replay":
         replay_df, warnings = ReplayEngine().run(args.file, timeframe=args.tf)
         report_path = build_report(replay_df, warnings, out_dir=Path(args.out), source_file=args.file)
         print(f"Replay rows: {len(replay_df)}")

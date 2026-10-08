@@ -372,6 +372,66 @@ def test_run_all_shutdown_handler_updates_status(tmp_path):
     assert status["live_engine_enabled"] is False
 
 
+def test_run_all_propagates_stop_and_joins_telegram_before_stopped(monkeypatch, tmp_path):
+    import src.run_all as module
+
+    store = RuntimeStatusStore(tmp_path / "runtime/runtime_status.json")
+    events = []
+    joins = []
+    finalized = threading.Event()
+    release = threading.Event()
+    original_join = threading.Thread.join
+    original_update = store.update
+
+    def install(event, status_store):
+        assert status_store is store
+        events.append(event)
+
+    def telegram_runner(**kwargs):
+        events.append(kwargs["stop_event"])
+        assert kwargs == {"once": False, "data_root": str(tmp_path), "stop_event": events[0]}
+        kwargs["stop_event"].set()
+        assert release.wait(5), "run_all never joined Telegram"
+        finalized.set()
+
+    def join(thread, timeout=None):
+        if thread.name in {"crypto13-telegram", "crypto13-live-engine"}:
+            joins.append((thread.name, timeout))
+        if thread.name == "crypto13-telegram":
+            assert not finalized.is_set()
+            assert store.read().get("service_state") != "stopped"
+            release.set()
+        return original_join(thread, timeout)
+
+    def update(**kwargs):
+        if kwargs.get("service_state") == "stopped":
+            assert finalized.is_set()
+        return original_update(**kwargs)
+
+    monkeypatch.setattr(module, "install_shutdown_handlers", install)
+    monkeypatch.setattr(threading.Thread, "join", join)
+    monkeypatch.setattr(store, "update", update)
+    try:
+        result = run_all(
+            config=RunAllConfig(symbols=["BTCUSDT"], timeframe="15m",
+                                candidate_source="production_like_raw", interval_sec=1,
+                                data_root=str(tmp_path)),
+            telegram_runner=telegram_runner,
+            status_store=store,
+            supervisor_runtime_sec=5,
+        )
+    finally:
+        release.set()
+        for event in events:
+            event.set()
+
+    assert result == 0
+    assert len(events) == 2 and events[0] is events[1]
+    assert finalized.is_set()
+    assert joins == [("crypto13-telegram", None), ("crypto13-live-engine", 10)]
+    assert store.read()["service_state"] == "stopped"
+
+
 def test_run_all_recovers_orphaned_preparing_session_without_starting_engine(tmp_path):
     store = RuntimeStatusStore(tmp_path / "runtime/global_runtime_status.json")
     manager = ResearchSessionManager(tmp_path, global_status_path=store.path)

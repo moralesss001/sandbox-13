@@ -421,3 +421,79 @@ class LivePaperStorage:
             seen.add(identity)
             unique.append(position)
         return unique
+
+
+class ShadowJournal:
+    """Versioned transactional shadow ledger; legacy CSV/JSON are never migrated.
+
+    Each event and its resulting state commit together. The database must live in
+    a dedicated session directory. FULL synchronous protects committed records;
+    disk-full errors propagate to the supervisor, never to a per-symbol retry.
+    """
+
+    def __init__(self, path, metadata):
+        import sqlite3
+        from .cloud_release import schema_preflight, schema_check
+
+        self.path = Path(path)
+        tables = {"events": "seq event_key kind payload", "state": "id body"}
+        schema_preflight(self.path, tables)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(str(self.path), timeout=5, isolation_level=None)
+        fresh = schema_check(self.db, tables)
+        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.execute("PRAGMA journal_mode=DELETE")
+        self.db.execute("CREATE TABLE IF NOT EXISTS events "
+                        "(seq INTEGER PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, "
+                        "kind TEXT NOT NULL, payload TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS state "
+                        "(id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)")
+        if fresh:
+            self.db.execute("PRAGMA user_version=1")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute("SELECT body FROM state WHERE id=1").fetchone()
+            if row is None:
+                initial = {"metadata": metadata, "signals": {}, "positions": {},
+                           "closed": {}, "market": {}, "funding": {},
+                           "health": {}, "balance": str(metadata["initial_balance"])}
+                self.db.execute("INSERT INTO state VALUES (1,?)", (self.encode(initial),))
+            elif json.loads(row[0])["metadata"] != metadata:
+                raise ValueError("shadow metadata mismatch: explicit new session required")
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            self.db.close()
+            raise
+
+    @staticmethod
+    def encode(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    def read(self):
+        return json.loads(self.db.execute("SELECT body FROM state WHERE id=1").fetchone()[0])
+
+    def transact(self, key, kind, payload, mutate):
+        body = self.encode(payload)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            old = self.db.execute("SELECT kind,payload FROM events WHERE event_key=?", (key,)).fetchone()
+            if old is not None:
+                if old != (kind, body):
+                    raise ValueError("conflicting duplicate shadow event")
+                self.db.execute("COMMIT")
+                return False
+            state = self.read()
+            mutate(state)
+            self.db.execute("INSERT INTO events(event_key,kind,payload) VALUES (?,?,?)",
+                            (key, kind, body))
+            self.db.execute("UPDATE state SET body=? WHERE id=1", (self.encode(state),))
+            self.db.execute("COMMIT")
+            return True
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def close(self):
+        self.db.close()

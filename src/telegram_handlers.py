@@ -35,9 +35,20 @@ FORBIDDEN_COMMANDS = {
 
 
 class TelegramHandlers:
-    def __init__(self, config: TelegramConfig, control: TelegramControlPanel | None = None):
+    def __init__(self, config: TelegramConfig, control: TelegramControlPanel | None = None, strategies=None):
         self.config = config
         self.control = control or TelegramControlPanel()
+        self.strategies = strategies
+
+    def strategy_authorized(self, user_id, chat_id):
+        return user_id is not None and chat_id is not None and self.config.is_allowed_user(user_id) and self.config.is_allowed_chat(chat_id)
+
+    def handle_document(self, raw, user_id, chat_id):
+        if not self.strategy_authorized(user_id, chat_id):
+            return TelegramResponse("Unauthorized user/chat.")
+        if self.strategies is None:
+            return TelegramResponse("Package service unavailable.")
+        return self.strategies.upload(raw)
 
     def handle(self, text: str, user_id: str | int | None, chat_id: str | int | None = None) -> str:
         return self.handle_message(text, user_id, chat_id).text
@@ -52,6 +63,13 @@ class TelegramHandlers:
             return TelegramResponse("Unauthorized user.")
         text = (text or "").strip()
         command = text.split()[0] if text else "/help"
+        from .telegram_strategy_lifecycle import COMMANDS, HELP
+        if command in COMMANDS:
+            if not self.strategy_authorized(user_id, chat_id):
+                return TelegramResponse("Unauthorized user/chat.")
+            if self.strategies is None:
+                return TelegramResponse("Package service unavailable.")
+            return self.strategies.command(text)
         if command in FORBIDDEN_COMMANDS:
             return TelegramResponse("Command is forbidden in read-only Telegram control panel.")
         if command == "/start":
@@ -110,7 +128,7 @@ class TelegramHandlers:
             result = self.control.export_data(parts[1].strip() if len(parts) == 2 else None)
             return TelegramResponse(result.message, self.control.main_keyboard(), result.documents)
         if command == "/help":
-            return TelegramResponse(self.control.help(), self.control.main_keyboard())
+            return TelegramResponse(self.control.help() + "\n\n" + HELP, self.control.main_keyboard())
         return TelegramResponse("Unknown command.\n" + self.control.help(), self.control.main_keyboard())
 
     def handle_callback(

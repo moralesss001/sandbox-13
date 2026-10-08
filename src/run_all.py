@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import os
 import signal
 import sys
@@ -194,6 +196,9 @@ def run_all(
     supervisor_runtime_sec: float | None = None,
 ) -> int:
     cfg = config or load_run_all_config()
+    from .cloud_release import enabled, run_cloud
+    if enabled():
+        return run_cloud(cfg.data_root, dry_run, supervisor_runtime_sec)
     plan = build_run_all_plan(cfg)
     manager = ResearchSessionManager(
         cfg.data_root,
@@ -235,7 +240,7 @@ def run_all(
     def supervise_telegram() -> None:
         while not stop_event.is_set():
             try:
-                telegram_runner(once=False, data_root=cfg.data_root)
+                telegram_runner(once=False, data_root=cfg.data_root, stop_event=stop_event)
             except Exception as exc:  # noqa: BLE001 - Railway supervisor must log and retry.
                 record_lifetime_error(f"telegram_bot: {type(exc).__name__}")
                 stop_event.wait(5)
@@ -257,9 +262,21 @@ def run_all(
                 store.update(live_engine_enabled=False)
                 stop_event.wait(5)
                 continue
+            snapshot = None
             try:
                 store.update(live_engine_enabled=True)
-                engine = engine_factory(
+                selected_factory = engine_factory
+                snapshot_path = manager.paths(str(session_id)).config_snapshot
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                if snapshot.get("engine_mode") == "live_shadow_v1":
+                    from .live_shadow import LiveShadowEngine
+
+                    selected_factory = LiveShadowEngine
+                elif snapshot.get("engine_mode") == "legacy_crypto13_shadow_v1":
+                    from .live_shadow import LegacyShadowEngine
+
+                    selected_factory = LegacyShadowEngine
+                engine = selected_factory(
                     data_root=manager.paths(str(session_id)).root,
                     status_store=store,
                     session_id=str(session_id),
@@ -274,6 +291,15 @@ def run_all(
                 )
             except Exception as exc:  # noqa: BLE001 - keep Telegram available and log engine failures.
                 terminal_session_ids.add(str(session_id))
+                if (not isinstance(snapshot, dict)
+                        or snapshot.get("engine_mode") in {"live_shadow_v1", "legacy_crypto13_shadow_v1"}
+                        or (manager.paths(str(session_id)).root / "shadow.sqlite3").exists()):
+                    from .live_shadow import finalize_shadow_failure
+
+                    record_lifetime_error(f"live_shadow: {type(exc).__name__}")
+                    finalize_shadow_failure(manager, str(session_id), type(exc).__name__)
+                    stop_event.wait(5)
+                    continue
                 errno_value = getattr(exc, "errno", None)
                 error_text = f"live_research_engine: {type(exc).__name__}"
                 if errno_value is not None:
@@ -357,8 +383,10 @@ def run_all(
             stop_event.set()
             break
         time.sleep(1)
-    for thread in threads:
-        thread.join(timeout=10)
+    # Package workers finalize through Telegram's finally block. Do not report
+    # the service stopped while that owner still holds unfinished journals.
+    threads[0].join()
+    threads[1].join(timeout=10)
     final_status = store.read()
     store.update(
         live_engine_enabled=False,
